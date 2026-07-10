@@ -134,6 +134,36 @@ final class LiquidMotion {
     }
 }
 
+// MARK: - Power state: pose the liquid still on Low Power Mode
+
+/// A single shared source of truth for Low Power Mode, so the decorative liquid canvases can pose
+/// STILL (like Reduce Motion already does) exactly when the user has asked the system to conserve
+/// battery. The live vessels/tubes/thread/sky each run a 20–60fps Canvas + CoreMotion; standing them
+/// down under Low Power Mode is a large, well-targeted power win at the moment it matters most, and it
+/// finally honours what the Today sky comment already promised. `lowPower` is a plain @Published read;
+/// the small number of liquid views observe this one object, and it only changes when the user toggles
+/// the setting or the battery crosses the 20% auto-threshold — never a per-frame publish.
+@MainActor
+final class LiquidPower: ObservableObject {
+    static let shared = LiquidPower()
+
+    @Published private(set) var lowPower: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
+
+    private init() {
+        // The power-state notification can post on a background thread; hop to main so the @Published
+        // write (observed by main-actor SwiftUI views) stays on the main actor.
+        NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            let now = ProcessInfo.processInfo.isLowPowerModeEnabled
+            Task { @MainActor in
+                guard let self, self.lowPower != now else { return }
+                self.lowPower = now
+            }
+        }
+    }
+}
+
 // MARK: - The liquid simulation
 
 /// Mutable physics for one body of liquid. Stepped once per frame from a Canvas

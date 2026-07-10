@@ -212,6 +212,13 @@ public enum AnalyticsEngine {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Inverse of `encodeStages`: decode a stored `stagesJSON` back into stage segments, or `[]` when the
+    /// string is nil/empty/unparseable. Used by the advanced-analytics pass to resolve per-stage windows.
+    public static func decodeStages(_ json: String?) -> [StageSegment] {
+        guard let json, let data = json.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([StageSegment].self, from: data)) ?? []
+    }
+
     /// Analyze one day's streams into a `DayResult`.
     ///
     /// - Parameters:

@@ -26,10 +26,24 @@ local SQLite — has no network layer at all: no phone-home, no analytics, no ac
 no login, no cloud sync, and no telemetry. Everything NOOP computes about you lives in a
 single SQLite file on your own device.
 
-There is exactly **one** opt-in exception: the **AI Coach** (§1.1a). It is off until you
-turn it on with your own API key; when you ask it a question it sends a short text
-summary of your recent metrics to the provider you choose. Nothing else in the app ever
-touches the network, and your raw data never does.
+There are **two** opt-in exceptions, both off by default:
+
+1. The **AI Coach** (§1.1a). It is off until you turn it on with your own API key; when you
+   ask it a question it sends a short text summary of your recent metrics to the provider you
+   choose.
+2. **Cloud sync** (§1.1b). Off until you enable it, grant explicit consent, and configure your
+   own Amazon S3 bucket + credentials (Settings → Advanced → Cloud sync). When active it uploads
+   your *older* raw sensor history (per-second heart-rate, R-R, SpO₂, skin-temp, motion) to
+   **your** bucket, verifies each upload by re-downloading and hash-matching, and only then
+   reclaims that space on device — keeping recent full-resolution data local. This deliberately
+   reverses the offline-first default, so it is a separate, revocable switch with explicit
+   "what leaves the device" consent, TLS in transit, one-tap disable + Keychain-key removal, and a
+   "delete remote data" action. The secret key is stored only in the Keychain
+   (`CloudSecretStore`); the S3 client (`Strand/Cloud/`) is the only networking outside the AI
+   Coach and lives in the app layer, not the shared packages (see §1.1 below).
+
+Apart from these two opt-ins, nothing else in the app ever touches the network, and your raw
+data never does.
 
 Data enters NOOP two ways, and leaves it (other than the optional AI Coach) only when **you**
 deliberately export it to another store on the **same device**:

@@ -208,6 +208,26 @@ enum LiquidRender {
     }
 }
 
+// MARK: - Adaptive cadence (U6)
+
+/// Idle poll interval (seconds) a settled hero canvas ticks at. ~8fps: frequent enough to wake within
+/// roughly one frame of a tilt, sparse enough to reclaim most of the settled-time frame budget.
+let liquidIdlePollInterval: Double = 1.0 / 8.0
+
+/// Settle-aware live-canvas cadence (U6). A hero liquid Canvas runs at the full rate while the fluid is
+/// actually moving, then drops to `liquidIdlePollInterval` once `LiquidSim.settled` holds — a still
+/// vessel stops paying the 60fps budget. The poll frame keeps stepping the sim, so the instant a tilt /
+/// value change re-energises it, `settled` flips false and the next body eval restores the full rate
+/// (≤ one poll frame of latency, imperceptible). Call from inside the Canvas renderer right after
+/// `sim.step(...)`. The async hop defers the state write past the current render pass (never mutates
+/// SwiftUI state mid-update) and only fires on an actual transition.
+@inline(__always)
+func liquidSettleCadence(settled: Bool, idle: Binding<Bool>) {
+    if settled != idle.wrappedValue {
+        DispatchQueue.main.async { idle.wrappedValue = settled }
+    }
+}
+
 // MARK: - Views
 
 /// A circular liquid gauge. `value` is 0...1 (nil = empty/no-data). Tap → splash.
@@ -221,8 +241,10 @@ struct LiquidVessel: View {
     var animated: Bool = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var power = LiquidPower.shared
     @State private var sim: LiquidSim
     @State private var splashes = 0
+    @State private var idle = false
 
     init(value: Double?, tint: Color, animated: Bool = true) {
         self.value = value
@@ -232,17 +254,17 @@ struct LiquidVessel: View {
     }
 
     var body: some View {
-        if animated && !reduceMotion { gauge } else { staticGauge }
+        if animated && !reduceMotion && !power.lowPower { gauge } else { staticGauge }
     }
 
     private var gauge: some View {
-        // 60fps: on the 120Hz ProMotion panel a 30fps cap updated the fluid only every 4th refresh,
-        // which read as juddery slosh. Only the 3 hero gauges + HR thread run live now (the small ones
-        // are static), so the higher rate is affordable and the liquid actually flows.
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { tl in
+        // 60fps while sloshing (on the 120Hz ProMotion panel a 30fps cap read as juddery), dropping to
+        // a slow poll once the fluid settles (U6) so a still hero vessel stops paying the full budget.
+        TimelineView(.animation(minimumInterval: idle ? liquidIdlePollInterval : 1.0 / 60.0)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: value ?? 0)
+                liquidSettleCadence(settled: sim.settled, idle: $idle)
                 LiquidRender.vessel(context, size, sim, now: now, tint: tint)
             }
         }
@@ -275,17 +297,21 @@ struct LiquidTube: View {
     var animated: Bool = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var power = LiquidPower.shared
     @State private var sim = LiquidSim(target: 0)
+    @State private var idle = false
 
     var body: some View {
-        if animated && !reduceMotion { liveTube } else { staticTube }
+        if animated && !reduceMotion && !power.lowPower { liveTube } else { staticTube }
     }
 
     private var liveTube: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { tl in
+        // 30fps while flowing, a slow poll once settled (U6).
+        TimelineView(.animation(minimumInterval: idle ? liquidIdlePollInterval : 1.0 / 30.0)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: frac)
+                liquidSettleCadence(settled: sim.settled, idle: $idle)
                 LiquidRender.tube(context, size, sim, now: now, frac: max(0, min(1, frac)), tint: tint)
             }
         }
@@ -311,9 +337,10 @@ struct LiquidThread: View {
     var animated: Bool = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var power = LiquidPower.shared
 
     var body: some View {
-        if animated && !reduceMotion { liveThread } else { staticThread }
+        if animated && !reduceMotion && !power.lowPower { liveThread } else { staticThread }
     }
 
     private var liveThread: some View {

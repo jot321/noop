@@ -134,6 +134,7 @@ struct SleepView: View {
                         sleepDebtLedger(resolved).staggeredAppear(index: 4)
                         stagesVsTypical(resolved).staggeredAppear(index: 5)
                         durationTrend(resolved).staggeredAppear(index: 6)
+                        SleepAnalyticsCard().staggeredAppear(index: 7)
                     }
                 } else {
                     emptyState

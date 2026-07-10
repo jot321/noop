@@ -180,6 +180,10 @@ struct SettingsView: View {
                 appearanceCard.staggeredAppear(index: 3)
                 strapCard.staggeredAppear(index: 4)
                 featuresCard.staggeredAppear(index: 5)
+                // Cloud sync is a first-class, consent-gated feature (BYO-S3), so it lives at the top
+                // level next to Features rather than buried in Advanced — a user configuring it needs to
+                // find it. Off + unconsented by default, so it's inert until deliberately enabled.
+                CloudSyncCard().staggeredAppear(index: 6)
 
                 // Lower-frequency sections collapse behind a single default-closed disclosure so the
                 // screen opens at ~6 sections instead of 11. Nothing is removed; every section here
@@ -195,10 +199,10 @@ struct SettingsView: View {
                     experimentalCard
                     backupCard
                 }
-                .staggeredAppear(index: 6)
+                .staggeredAppear(index: 7)
 
                 // About stays expanded at the foot (version, links and the help sheets people return to).
-                aboutCard.staggeredAppear(index: 7)
+                aboutCard.staggeredAppear(index: 8)
             }
         }
         .alert(backupAlertTitle, isPresented: $showBackupAlert) {
@@ -2167,7 +2171,9 @@ private struct SettingsDisclosureGroup<Content: View>: View {
 
 /// A grouped settings card: a "Settings" overline + icon + title header, an explanatory blurb,
 /// then content. A faint accent-blue wash anchors the card to NOOP's neutral chrome (WHOOP skin).
-private struct SettingsSection<Content: View>: View {
+// Internal (not private) so sibling settings cards in their own files — e.g. CloudSyncCard — can reuse
+// the same section chrome instead of re-deriving the StrandCard + overline + icon header.
+struct SettingsSection<Content: View>: View {
     let icon: String
     let title: LocalizedStringKey
     let blurb: LocalizedStringKey

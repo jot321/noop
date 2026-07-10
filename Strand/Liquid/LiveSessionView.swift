@@ -21,6 +21,7 @@ struct LiveSessionView: View {
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var profile: ProfileStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var power = LiquidPower.shared
 
     /// One runner per presentation — created here, started on appear, never restarted.
     @StateObject private var runner = LiveSessionRunner()
@@ -163,7 +164,7 @@ struct LiveSessionView: View {
 
     /// Breathing is the "on track" signal: only in band, only once active, never for Reduce Motion.
     private var isBreathing: Bool {
-        !reduceMotion
+        !reduceMotion && !power.lowPower
             && runner.output?.status == .active
             && runner.output?.position == .inBand
     }

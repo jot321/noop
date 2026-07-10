@@ -1274,12 +1274,18 @@ private struct LiveLogCard: View {
 /// The "last sync" relative-time label — shared between the header stats and the Signal Trust rail so
 /// both read identically.
 private enum LiveSyncFormat {
+    /// Shared, reused formatter — allocating a `RelativeDateTimeFormatter` is comparatively expensive,
+    /// and this label is rebuilt on the render path (header stats + Signal Trust rail) as HR streams.
+    private static let relative: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+
     static func lastSyncLabel(_ ts: TimeInterval?) -> String {
         guard let ts else { return String(localized: "Never") }
         let date = Date(timeIntervalSince1970: ts)
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
+        return relative.localizedString(for: date, relativeTo: Date())
     }
 }
 

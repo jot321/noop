@@ -21,6 +21,7 @@ struct LiquidTodayView: View {
     @EnvironmentObject var router: NavRouter
     @EnvironmentObject var profile: ProfileStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var power = LiquidPower.shared
 
     /// Shared with the real Today's card-customise editor so the two stay in sync.
     @AppStorage(DashboardCardPrefs.selectionKey) private var dashboardCardsRaw = ""
@@ -66,11 +67,12 @@ struct LiquidTodayView: View {
 
     // Custom liquid pull-to-refresh: a vessel that FILLS as you drag, releases into a refresh (replaces
     // the system spinner). Driven by the scroll's top overscroll offset.
-    @State private var pullY: CGFloat = 0
-    @State private var refreshArmed = false
-    @State private var refreshing = false
-    @State private var pullHaptic = 0
-    private let pullThreshold: CGFloat = 80
+    //
+    // The pull offset changes every frame while you drag. Held here as a plain `@State` object (NOT
+    // `@StateObject`), this view does NOT subscribe to its `objectWillChange`, so a pull no longer
+    // re-evaluates the entire dashboard body per frame — only `LiquidRefreshIndicator`, which observes
+    // it, redraws. (U8) Firing the refresh calls back into `fireRefresh()`.
+    @State private var pull = LiquidPullState()
 
     /// Mock Vitality purple (#9b7bff) has no exact StrandPalette token in this theme.
     private let liquidPurple = Color(.sRGB, red: 0x9b / 255, green: 0x7b / 255, blue: 0xff / 255, opacity: 1)
@@ -182,7 +184,7 @@ struct LiquidTodayView: View {
                 }
                 .frame(height: 0)
 
-                liquidRefreshIndicator   // grows in the revealed space; a vessel filling with the pull
+                LiquidRefreshIndicator(pull: pull, tint: liquidHeart)   // grows in the revealed space; a vessel filling with the pull
 
                 VStack(alignment: .leading, spacing: 12) {
                     scene
@@ -206,7 +208,7 @@ struct LiquidTodayView: View {
             #endif
         }
         .coordinateSpace(name: Self.pullSpace)
-        .onPreferenceChange(PullOffsetKey.self) { handlePull($0) }
+        .onPreferenceChange(PullOffsetKey.self) { pull.update($0) { fireRefresh() } }
         // The sky is a FIXED full-bleed backdrop drawn behind the scroll content, edge-to-edge under the
         // status bar. A ScrollView background does not scroll with the content, so pulling down never
         // moves the sky (the exact behaviour the scaffold uses on the classic Today).
@@ -216,7 +218,7 @@ struct LiquidTodayView: View {
                 // Reduce-motion (and low-power) users get the same sky posed still — no twinkle/breath.
                 // Also static until the first data load settles, so launch isn't fighting a live sky too.
                 Group {
-                    if reduceMotion || !dataLoaded { LiquidSkyStatic(hour: liveHour) }
+                    if reduceMotion || power.lowPower || !dataLoaded { LiquidSkyStatic(hour: liveHour) }
                     else { LiquidSky(hour: liveHour) }
                 }
                 .frame(maxWidth: .infinity)
@@ -232,8 +234,6 @@ struct LiquidTodayView: View {
         // A light tick when the day changes (swipe or calendar pick) — the WHOOP-style day nav should
         // feel physical ("every tiny little thing").
         .liquidSelectionHaptic(trigger: selectedDayOffset)
-        // A firm tick when the pull passes the release threshold (the custom liquid refresh).
-        .liquidMediumHaptic(trigger: pullHaptic)
         .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)") { await load() }
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
@@ -271,44 +271,14 @@ struct LiquidTodayView: View {
 
     static let pullSpace = "liqTodayScroll"
 
-    /// Reserves the revealed space at the top and shows a vessel that fills with the pull, then sloshes
-    /// while the refresh runs.
-    private var liquidRefreshIndicator: some View {
-        let progress = min(1, max(0, pullY / pullThreshold))
-        return ZStack {
-            if refreshing {
-                LiquidVessel(value: 0.6, tint: liquidHeart, animated: true)
-                    .frame(width: 34, height: 34)
-            } else if pullY > 2 {
-                LiquidVessel(value: progress, tint: liquidHeart, animated: false)
-                    .frame(width: 30, height: 30)
-                    .opacity(progress)
-                    .scaleEffect(0.7 + 0.3 * progress)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: refreshing ? 64 : min(pullY, pullThreshold * 1.15))
-        .animation(.easeOut(duration: 0.22), value: refreshing)
-    }
-
-    /// Arm the refresh once the pull passes the threshold; FIRE it when the finger releases (the pull
-    /// springs back toward zero). Guarded so it can't double-fire or re-trigger mid-refresh.
-    private func handlePull(_ y: CGFloat) {
-        pullY = max(0, y)
-        guard !refreshing else { return }
-        if pullY >= pullThreshold, !refreshArmed {
-            refreshArmed = true
-            pullHaptic &+= 1
-        }
-        if refreshArmed, pullY < 6 {
-            refreshArmed = false
-            refreshing = true
-            Task {
-                await repo.refresh()
-                await load()
-                try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"
-                withAnimation(.easeOut(duration: 0.25)) { refreshing = false }
-            }
+    /// Run the actual refresh once the release has fired. Kept on the root because it drives the shared
+    /// repository + day reload; `pull.finishRefreshing()` clears the spinner when the reload settles.
+    private func fireRefresh() {
+        Task { @MainActor in
+            await repo.refresh()
+            await load()
+            try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"
+            pull.finishRefreshing()
         }
     }
 
@@ -983,6 +953,71 @@ struct LiquidTodayView: View {
 private struct PullOffsetKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+// MARK: - Isolated pull-to-refresh state (keeps per-frame pull deltas off the dashboard body)
+
+/// Holds the live pull offset + refresh lifecycle for the custom liquid pull-to-refresh. LiquidTodayView
+/// holds this as a plain `@State` (so it does NOT observe it); only `LiquidRefreshIndicator` subscribes.
+/// That way dragging — which updates `pullY` every frame — redraws just the small indicator, not the
+/// whole dashboard. (U8)
+@MainActor
+final class LiquidPullState: ObservableObject {
+    @Published var pullY: CGFloat = 0
+    @Published private(set) var refreshing = false
+    /// Bumped once when the pull crosses the release threshold, to drive a single medium haptic.
+    @Published private(set) var haptic = 0
+
+    let threshold: CGFloat = 80
+    private var armed = false
+
+    /// Feed the latest top-overscroll offset. Arms at the threshold and FIRES `onFire` on release
+    /// (the pull springs back toward zero). Guarded so it can't double-fire or re-trigger mid-refresh.
+    func update(_ y: CGFloat, onFire: () -> Void) {
+        pullY = max(0, y)
+        guard !refreshing else { return }
+        if pullY >= threshold, !armed {
+            armed = true
+            haptic &+= 1
+        }
+        if armed, pullY < 6 {
+            armed = false
+            refreshing = true
+            onFire()
+        }
+    }
+
+    /// Clear the spinner once the reload settles.
+    func finishRefreshing() {
+        withAnimation(.easeOut(duration: 0.25)) { refreshing = false }
+    }
+}
+
+/// The revealed-space indicator: a vessel that fills as you drag, then sloshes while the refresh runs.
+/// Observes `LiquidPullState`, so only this small view redraws during a pull.
+private struct LiquidRefreshIndicator: View {
+    @ObservedObject var pull: LiquidPullState
+    let tint: Color
+
+    var body: some View {
+        let progress = min(1, max(0, pull.pullY / pull.threshold))
+        return ZStack {
+            if pull.refreshing {
+                LiquidVessel(value: 0.6, tint: tint, animated: true)
+                    .frame(width: 34, height: 34)
+            } else if pull.pullY > 2 {
+                LiquidVessel(value: progress, tint: tint, animated: false)
+                    .frame(width: 30, height: 30)
+                    .opacity(progress)
+                    .scaleEffect(0.7 + 0.3 * progress)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: pull.refreshing ? 64 : min(pull.pullY, pull.threshold * 1.15))
+        .animation(.easeOut(duration: 0.22), value: pull.refreshing)
+        // A firm tick when the pull passes the release threshold (the custom liquid refresh).
+        .liquidMediumHaptic(trigger: pull.haptic)
+    }
 }
 
 // MARK: - NOOP wordmark (centred, with a tap easter egg)

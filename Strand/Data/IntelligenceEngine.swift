@@ -939,6 +939,87 @@ final class IntelligenceEngine: ObservableObject {
         }
         if !restPoints.isEmpty { _ = try? await store.upsertMetricSeries(restPoints, deviceId: computedId) }
 
+        // ── Advanced analytics (docs/ADVANCED_ANALYTICS_PLAN.md) ─────────────────────────────────────
+        // Second, purely-additive pass over the nights just scored. For each night's in-bed window we
+        // read the raw optical / thermal / motion / beat streams from the day's resolved owner and run
+        // the SpO2, apnea-screen, thermoregulation, posture and stage-resolved-HRV engines. Everything
+        // here writes new `metricSeries` keys (EAV — no schema change) and fills `dailyMetric.spo2Pct`
+        // ONLY where it is currently nil (the measured slot `analyzeDay` leaves empty), so imports and
+        // every existing value are untouched. On a WHOOP 5/MG the `spo2Sample` stream is absent, so the
+        // SpO2 / apnea engines simply produce nothing — no fabricated numbers. Matches the inline-compute
+        // discipline of the import-scoring fold above (light per-night work, streams read off the actor).
+        var advPoints: [MetricPoint] = []
+        for night in scoredNights {
+            let day = night.daily.day
+            let owner = readOwnerByDay[day]?.owner ?? computedId
+            let sessions = night.cachedSleep
+            guard let sleepStart = sessions.map({ $0.effectiveStartTs }).min(),
+                  let sleepEnd = sessions.map({ $0.endTs }).max(), sleepEnd > sleepStart else { continue }
+            let spanSec = sleepEnd - sleepStart
+
+            async let spo2A = store.spo2Samples(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
+            async let skinA = store.skinTempSamples(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
+            async let gravA = store.gravitySamples(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
+            async let rrA = store.rrIntervals(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
+            let spo2 = (try? await spo2A) ?? []
+            let skin = (try? await skinA) ?? []
+            let grav = (try? await gravA) ?? []
+            let rr = (try? await rrA) ?? []
+
+            // Stage windows for this night (union of the sessions' stored hypnograms); asleep spans only,
+            // since optical oximetry is corrupted by motion.
+            let stageTuples: [(start: Int, end: Int, stage: String)] = sessions
+                .flatMap { AnalyticsEngine.decodeStages($0.stagesJSON) }
+                .map { (start: $0.start, end: $0.end, stage: $0.stage) }
+            let asleepRanges = stageTuples.filter { $0.stage != "wake" }.map { (start: $0.start, end: $0.end) }
+
+            // 1) SpO2 + apnea screening.
+            var nightSpO2: SpO2Engine.NightSummary? = nil
+            if spo2.count >= SpO2Engine.minSamplesPerWindow {
+                let pts = SpO2Engine.analyze(spo2: spo2, asleepRanges: asleepRanges)
+                if let s = SpO2Engine.nightSummary(points: pts) {
+                    nightSpO2 = s
+                    _ = try? await store.fillDailySpo2IfNil(deviceId: computedId, day: day, spo2Pct: s.meanPct)
+                    advPoints.append(MetricPoint(day: day, key: "spo2_mean", value: s.meanPct))
+                    advPoints.append(MetricPoint(day: day, key: "spo2_min", value: s.minPct))
+                    advPoints.append(MetricPoint(day: day, key: "odi", value: s.odi))
+                    advPoints.append(MetricPoint(day: day, key: "t90", value: s.t90Fraction))
+                }
+            }
+            // Only surface an apnea AHI estimate when the primary ODI signal exists — an RR/movement-only
+            // estimate on a strap with no SpO2 is too weak to print as an apnea number.
+            if nightSpO2 != nil {
+                let apnea = ApneaScreener.screen(nightSpO2: nightSpO2, rr: rr, gravity: grav, sleepSpanSec: spanSec)
+                advPoints.append(MetricPoint(day: day, key: "ahi_est", value: apnea.estimatedAHI))
+            }
+
+            // 2) Thermoregulation curve.
+            let skinFamily = Self.skinTempFamily(forOwner: owner, devices: regDevices)
+            if let thermo = ThermoCurveEngine.analyze(skinTemp: skin, family: skinFamily,
+                                                      sleepStart: sleepStart, sleepEnd: sleepEnd) {
+                advPoints.append(MetricPoint(day: day, key: "temp_amplitude", value: thermo.amplitudeC))
+                advPoints.append(MetricPoint(day: day, key: "temp_nadir_frac", value: thermo.nadirFraction))
+                advPoints.append(MetricPoint(day: day, key: "temp_prewake_slope", value: thermo.preWakeSlopeCPerHour))
+            }
+
+            // 3) Sleep posture / actigraphy.
+            if let posture = PostureEngine.analyze(gravity: grav, sleepStart: sleepStart, sleepEnd: sleepEnd) {
+                advPoints.append(MetricPoint(day: day, key: "supine_frac", value: PostureEngine.supineFraction(posture)))
+                advPoints.append(MetricPoint(day: day, key: "restless_frac", value: posture.restlessFraction))
+                advPoints.append(MetricPoint(day: day, key: "position_changes", value: Double(posture.positionChanges)))
+            }
+
+            // 4) Stage-resolved / autonomic HRV (wires existing HRV math to the stage windows).
+            if !rr.isEmpty {
+                let hrv = HRVByStage.analyze(rr: rr, stages: stageTuples)
+                if let lfhf = hrv.nightLFHF { advPoints.append(MetricPoint(day: day, key: "hrv_lfhf", value: lfhf)) }
+                for s in hrv.byStage where s.rmssd != nil {
+                    advPoints.append(MetricPoint(day: day, key: "hrv_rmssd_\(s.stage)", value: s.rmssd!))
+                }
+            }
+        }
+        if !advPoints.isEmpty { _ = try? await store.upsertMetricSeries(advPoints, deviceId: computedId) }
+
         // ── Fitness Age (Phase 2) , weekly, keyed to the week's Saturday ────────────────────────────
         // Roll the last 7 computed days into the Nes/HUNT inputs and upsert a weekly Fitness Age (+ an
         // optional VO₂max when a waist is set) under the same "-noop" source. Idempotent on the Saturday

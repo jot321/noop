@@ -92,6 +92,22 @@ public struct DailyMetric: Equatable, Codable {
 
 extension WhoopStore {
 
+    /// Fill `dailyMetric.spo2Pct` for one day ONLY when the existing value is NULL — the "measured" slot
+    /// `AnalyticsEngine` leaves nil (docs/ADVANCED_ANALYTICS_PLAN.md §1). This never overwrites an
+    /// imported/existing value: an Apple-Health / Oura / WHOOP-export SpO2 already sitting on the row
+    /// wins, and the derived ratio-of-ratios value only fills a genuine gap. No-op if the row is absent.
+    /// Returns rows changed (0 or 1).
+    @discardableResult
+    public func fillDailySpo2IfNil(deviceId: String, day: String, spo2Pct: Double) async throws -> Int {
+        try syncWrite { db in
+            try db.execute(sql: """
+                UPDATE dailyMetric SET spo2Pct = ?
+                WHERE deviceId = ? AND day = ? AND spo2Pct IS NULL
+                """, arguments: [spo2Pct, deviceId, day])
+            return db.changesCount
+        }
+    }
+
     // MARK: - Upserts (idempotent by natural key; latest server value wins on conflict)
 
     /// Upsert cached sleep sessions. Natural key (deviceId, startTs). Returns rows changed.

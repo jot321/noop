@@ -446,6 +446,49 @@ extension WhoopStore {
                 t.primaryKey(["deviceId", "startTs"])
             }
         }
+        // v23 (cloud offload + prune): the decoded 1 Hz stream tables are the durable record but are
+        // never pruned, so a continuously-worn strap grows the DB ~10-30 MB/day without bound. The
+        // tiered-offload design (docs/CLOUD_SYNC_PLAN.md) uploads each SEALED UTC day per stream to the
+        // user's own S3 bucket, verifies the object by re-downloading and hash-matching, and only THEN
+        // downsamples/deletes the local raw for days older than the retention window. Two new tables:
+        //
+        // `cloudObject` is the per-(deviceId, day, stream) upload ledger: object key + sha256 + sizes and
+        // a state machine `uploaded -> verified` (+ `prunedAt` once local raw was reclaimed). A day/stream
+        // is NEVER prunable unless its row is `verified` — the hash check is what makes prune safe. Rows
+        // are inserted only AFTER a successful PUT, so "no row" always means "nothing durably offloaded".
+        //
+        // `minuteAgg` keeps a compact local echo of pruned history: per-minute min/mean/max/count per
+        // scalar channel (multi-channel streams split into `gravitySample.x` style keys), so charts and
+        // trends for old days still render locally at 1-minute grain after the 1 Hz raw is gone.
+        //
+        // Both tables are NEW and additive (no existing row touched); the per-row `synced` columns from v5
+        // stay dead (see StreamStore.insert doc) — offload state lives here, at day grain, instead.
+        migrator.registerMigration("v23-cloud-sync") { db in
+            try db.create(table: "cloudObject") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("day", .text).notNull()        // UTC YYYY-MM-DD
+                t.column("stream", .text).notNull()     // e.g. "hrSample"
+                t.column("objectKey", .text).notNull()  // full S3 object key
+                t.column("sha256", .text).notNull()     // hex digest of the uploaded object bytes
+                t.column("byteSize", .integer).notNull()
+                t.column("rowCount", .integer).notNull()
+                t.column("state", .text).notNull()      // "uploaded" | "verified"
+                t.column("uploadedAt", .integer).notNull()
+                t.column("verifiedAt", .integer)
+                t.column("prunedAt", .integer)
+                t.primaryKey(["deviceId", "day", "stream"])
+            }
+            try db.create(table: "minuteAgg") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("stream", .text).notNull()     // scalar channel, e.g. "hrSample", "gravitySample.x"
+                t.column("ts", .integer).notNull()      // minute-aligned unix seconds
+                t.column("minV", .double).notNull()
+                t.column("meanV", .double).notNull()
+                t.column("maxV", .double).notNull()
+                t.column("count", .integer).notNull()
+                t.primaryKey(["deviceId", "stream", "ts"])
+            }
+        }
         return migrator
     }
 }
