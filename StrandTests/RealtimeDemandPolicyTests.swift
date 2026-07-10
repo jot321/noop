@@ -146,6 +146,88 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         XCTAssertFalse(sentState.shouldSendToggle(wanted: true))
     }
 
+    func testWithoutResponseBackpressureBlocksStartWithoutAdvancingSentState() {
+        let sentState = RealtimeCommandSentState()
+        let demand = RealtimeDemandOutput(toggleWanted: true, heavyWhoop4Wanted: true)
+
+        let plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop4,
+            demand: demand,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: false
+        )
+
+        XCTAssertEqual(plan, .none)
+        XCTAssertFalse(sentState.toggleArmed)
+        XCTAssertFalse(sentState.heavyWhoop4Armed)
+        XCTAssertNil(sentState.heavyWhoop4ArmedAt)
+    }
+
+    func testWithoutResponseBackpressureBlocksStopWithoutClearingSentState() {
+        let armedAt = Date(timeIntervalSince1970: 123)
+        var sentState = RealtimeCommandSentState()
+        sentState.recordToggle(wanted: true, queued: true)
+        sentState.recordHeavy(wanted: true, queued: true, at: armedAt)
+        let demand = RealtimeDemandOutput(toggleWanted: false, heavyWhoop4Wanted: false)
+
+        let plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop4,
+            demand: demand,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: false
+        )
+
+        XCTAssertEqual(plan, .none)
+        XCTAssertTrue(sentState.toggleArmed)
+        XCTAssertTrue(sentState.heavyWhoop4Armed)
+        XCTAssertEqual(sentState.heavyWhoop4ArmedAt, armedAt)
+    }
+
+    func testPeripheralReadinessPlansPendingStartRetry() {
+        let sentState = RealtimeCommandSentState()
+        let demand = RealtimeDemandOutput(toggleWanted: true, heavyWhoop4Wanted: true)
+
+        let plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop4,
+            demand: demand,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+
+        XCTAssertEqual(
+            plan,
+            RealtimeCommandWritePlan(heavyWhoop4Wanted: true, toggleWanted: true)
+        )
+    }
+
+    func testPeripheralReadinessPlansPendingStopRetry() {
+        var sentState = RealtimeCommandSentState()
+        sentState.recordToggle(wanted: true, queued: true)
+        sentState.recordHeavy(wanted: true, queued: true,
+                              at: Date(timeIntervalSince1970: 123))
+        let demand = RealtimeDemandOutput(toggleWanted: false, heavyWhoop4Wanted: false)
+
+        let plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop4,
+            demand: demand,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+
+        XCTAssertEqual(
+            plan,
+            RealtimeCommandWritePlan(heavyWhoop4Wanted: false, toggleWanted: false)
+        )
+    }
+
     func testDisconnectClearsSentStateButPreservesOwnerIntentForRearm() {
         var owners = RealtimeOwnerCoordinator()
         _ = owners.acquire(.liveSession)

@@ -79,6 +79,51 @@ struct RealtimeCommandSentState {
     }
 }
 
+struct RealtimeCommandWritePlan: Equatable {
+    let heavyWhoop4Wanted: Bool?
+    let toggleWanted: Bool?
+
+    static let none = RealtimeCommandWritePlan(
+        heavyWhoop4Wanted: nil,
+        toggleWanted: nil
+    )
+}
+
+struct RealtimeCommandWritePlanner {
+    static func plan(deviceFamily: DeviceFamily,
+                     demand: RealtimeDemandOutput,
+                     sentState: RealtimeCommandSentState,
+                     connected: Bool,
+                     bonded: Bool,
+                     canSendWriteWithoutResponse: Bool,
+                     forceWantedCommands: Bool = false)
+        -> RealtimeCommandWritePlan {
+        guard connected, canSendWriteWithoutResponse else { return .none }
+
+        let heavyWhoop4Wanted: Bool? = deviceFamily == .whoop4
+            && sentState.shouldSendHeavy(
+                wanted: demand.heavyWhoop4Wanted,
+                forceWanted: forceWantedCommands
+            )
+            ? demand.heavyWhoop4Wanted
+            : nil
+
+        let canSendToggle = deviceFamily == .whoop4 || bonded
+        let toggleWanted: Bool? = canSendToggle
+            && sentState.shouldSendToggle(
+                wanted: demand.toggleWanted,
+                forceWanted: forceWantedCommands
+            )
+            ? demand.toggleWanted
+            : nil
+
+        return RealtimeCommandWritePlan(
+            heavyWhoop4Wanted: heavyWhoop4Wanted,
+            toggleWanted: toggleWanted
+        )
+    }
+}
+
 struct RealtimeDemandOutput: Equatable {
     var toggleWanted: Bool
     var heavyWhoop4Wanted: Bool

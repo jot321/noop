@@ -1396,6 +1396,22 @@ public final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// Realtime sent-state is meaningful only when CoreBluetooth accepts a without-response write.
+    /// Recheck readiness immediately before every toggle/R10-R11 write because one write can consume the
+    /// available flow-control slot before the next command in the same reconciliation pass.
+    @discardableResult
+    private func sendRealtimeStateCommand(_ command: WhoopCommand, wanted: Bool) -> Bool {
+        guard let peripheral, peripheral.canSendWriteWithoutResponse else {
+            log("send(\(command.label)) deferred — without-response flow control busy")
+            return false
+        }
+        return send(
+            command,
+            payload: [wanted ? 0x01 : 0x00],
+            writeType: .withoutResponse
+        )
+    }
+
     /// Send a command to the WHOOP strap.
     /// - Parameters:
     ///   - command: The command to send.
@@ -2054,18 +2070,22 @@ public final class BLEManager: NSObject, ObservableObject {
         let demand = currentRealtimeDemand()
         lastRealtimeDemand = demand
 
-        let heavyWanted = demand.heavyWhoop4Wanted
-        let shouldSendHeavy = selectedModel.deviceFamily == .whoop4
-            && state.connected
-            && realtimeCommandSentState.shouldSendHeavy(
-                wanted: heavyWanted,
-                forceWanted: forceWantedCommands
-            )
-        if shouldSendHeavy {
-            let queued = send(.sendR10R11Realtime, payload: [heavyWanted ? 0x01 : 0x00])
-            realtimeCommandSentState.recordHeavy(wanted: heavyWanted, queued: queued, at: Date())
-        } else if selectedModel.deviceFamily != .whoop4 {
+        if selectedModel.deviceFamily != .whoop4 {
             realtimeCommandSentState.clearHeavyForOtherFamily()
+        }
+        let writePlan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: selectedModel.deviceFamily,
+            demand: demand,
+            sentState: realtimeCommandSentState,
+            connected: state.connected,
+            bonded: state.bonded,
+            canSendWriteWithoutResponse: peripheral?.canSendWriteWithoutResponse == true,
+            forceWantedCommands: forceWantedCommands
+        )
+
+        if let heavyWanted = writePlan.heavyWhoop4Wanted {
+            let queued = sendRealtimeStateCommand(.sendR10R11Realtime, wanted: heavyWanted)
+            realtimeCommandSentState.recordHeavy(wanted: heavyWanted, queued: queued, at: Date())
         }
 
         if selectedModel.deviceFamily == .whoop4,
@@ -2074,14 +2094,8 @@ public final class BLEManager: NSObject, ObservableObject {
             state.standardHRMode = "Standard HR mode (low bandwidth) - your Bluetooth radio couldn't sustain the full stream; live heart rate via the standard profile."
         }
 
-        let canSendToggle = state.connected && (selectedModel.deviceFamily == .whoop4 || state.bonded)
-        let toggleWanted = demand.toggleWanted
-        if canSendToggle,
-           realtimeCommandSentState.shouldSendToggle(
-               wanted: toggleWanted,
-               forceWanted: forceWantedCommands
-           ) {
-            let queued = send(.toggleRealtimeHR, payload: [toggleWanted ? 0x01 : 0x00])
+        if let toggleWanted = writePlan.toggleWanted {
+            let queued = sendRealtimeStateCommand(.toggleRealtimeHR, wanted: toggleWanted)
             realtimeCommandSentState.recordToggle(wanted: toggleWanted, queued: queued)
         }
 
@@ -2302,9 +2316,9 @@ public final class BLEManager: NSObject, ObservableObject {
         // demand. Passive toggle-only capture must never manufacture R10/R11 demand.
         if demand.heavyWhoop4Wanted {
             let armedAt = realtimeCommandSentState.heavyWhoop4ArmedAt ?? Date()
-            let heavyQueued = send(.sendR10R11Realtime, payload: [0x01])
+            let heavyQueued = sendRealtimeStateCommand(.sendR10R11Realtime, wanted: true)
             realtimeCommandSentState.recordHeavy(wanted: true, queued: heavyQueued, at: armedAt)
-            let toggleQueued = send(.toggleRealtimeHR, payload: [0x01])
+            let toggleQueued = sendRealtimeStateCommand(.toggleRealtimeHR, wanted: true)
             realtimeCommandSentState.recordToggle(wanted: true, queued: toggleQueued)
         }
         keepAliveTick += 1
@@ -3037,6 +3051,11 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
 
 // MARK: - CBPeripheralDelegate
 extension BLEManager: @preconcurrency CBPeripheralDelegate {
+    public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard self.peripheral === peripheral else { return }
+        reconcileRealtime()
+    }
+
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error {
             log("Service discovery failed: \(error.localizedDescription)")
@@ -3317,7 +3336,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             send(.getClock, payload: [])
             send(.getClock, payload: [0x00])
         }
-        let heavyStopQueued = send(.sendR10R11Realtime, payload: [0x00])
+        let heavyStopQueued = sendRealtimeStateCommand(.sendR10R11Realtime, wanted: false)
         realtimeCommandSentState.recordHeavy(wanted: false, queued: heavyStopQueued, at: Date())
         send(.getDataRange)                          // refresh the strap's stored range for the watchdog
         // Plain offload (no high-freq-sync), rate-limited (first connect always runs; reconnect-flaps are
