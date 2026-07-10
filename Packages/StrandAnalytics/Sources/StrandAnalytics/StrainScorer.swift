@@ -132,27 +132,47 @@ public enum StrainScorer {
 
     // MARK: - TRIMP accumulation
 
-    /// Infer per-sample duration (minutes) from the first two timestamps. Falls
-    /// back to 1 s when fewer than two samples or coincident timestamps.
-    static func sampleDurationMinutes(_ hr: [HRSample]) -> Double {
-        guard hr.count >= 2 else { return fallbackSampleMin }
-        let deltaS = abs(Double(hr[1].ts - hr[0].ts))
-        return deltaS > 0 ? deltaS / 60.0 : fallbackSampleMin
+    /// Longest inter-sample gap (seconds) a sample's HR is trusted to cover. Bridges the 5/MG's ~30 s
+    /// live cadence (with jitter) while ensuring an off-wrist hole never accrues load — the samples on
+    /// either side of a long gap each cover at most this much of it.
+    static let maxSampleGapS: Double = 120.0
+
+    /// Per-sample integration durations (minutes): each sample carries its OWN gap to the next sample,
+    /// clamped to `maxSampleGapS`; the last sample reuses the previous clamped gap. A time-ordered
+    /// duplicate ts contributes 0 (free dedup across coalesced sources).
+    ///
+    /// This replaced a single first-two-timestamps duration applied to the WHOLE series, which broke on
+    /// MIXED-cadence days — the norm on a WHOOP 5/MG, where synced backfill is 1 Hz but live standard HR
+    /// arrives ~every 30 s. A day whose array opened on a 1 Hz stretch weighted every sparse sample at
+    /// 1 s (undercounting the live segment's load ~30×, e.g. a real workout day scoring ~1 Effort), and
+    /// the mirror-image opening undercounted nothing but inflated dense stretches 30×.
+    static func sampleDurationsMinutes(_ hr: [HRSample]) -> [Double] {
+        guard hr.count >= 2 else { return Array(repeating: fallbackSampleMin, count: hr.count) }
+        var out = [Double](repeating: fallbackSampleMin, count: hr.count)
+        for i in 0..<(hr.count - 1) {
+            let deltaS = Double(hr[i + 1].ts - hr[i].ts)
+            out[i] = min(max(deltaS, 0), maxSampleGapS) / 60.0
+        }
+        out[hr.count - 1] = out[hr.count - 2]
+        return out
     }
 
     static func edwardsTRIMP(_ hr: [HRSample], restingHR: Double, hrReserve: Double,
-                             sampleDurationMin: Double) -> Double {
-        var weighted = 0
-        for s in hr { weighted += zoneWeight(Double(s.bpm), restingHR: restingHR, hrReserve: hrReserve) }
-        return Double(weighted) * sampleDurationMin
+                             sampleDurationsMin: [Double]) -> Double {
+        var acc = 0.0
+        for (i, s) in hr.enumerated() {
+            let w = zoneWeight(Double(s.bpm), restingHR: restingHR, hrReserve: hrReserve)
+            if w > 0 { acc += Double(w) * sampleDurationsMin[i] }
+        }
+        return acc
     }
 
     static func banisterTRIMP(_ hr: [HRSample], restingHR: Double, hrReserve: Double,
-                              sampleDurationMin: Double, b: Double) -> Double {
+                              sampleDurationsMin: [Double], b: Double) -> Double {
         var acc = 0.0
-        for s in hr {
+        for (i, s) in hr.enumerated() {
             let x = pctHRR(Double(s.bpm), restingHR: restingHR, hrReserve: hrReserve) / 100.0
-            if x > 0 { acc += sampleDurationMin * x * banisterScale * exp(b * x) }
+            if x > 0 { acc += sampleDurationsMin[i] * x * banisterScale * exp(b * x) }
         }
         return acc
     }
@@ -249,7 +269,7 @@ public enum StrainScorer {
         }
         if !enoughData || effMax <= restingHR { return nil }
 
-        let sampleDur = sampleDurationMinutes(hr)
+        let sampleDurs = sampleDurationsMinutes(hr)
         let hrReserve = effMax - restingHR
 
         let trimp: Double
@@ -257,10 +277,10 @@ public enum StrainScorer {
         case .banister:
             let b = sex.lowercased().hasPrefix("f") ? banisterBWomen : banisterBMen
             trimp = banisterTRIMP(hr, restingHR: restingHR, hrReserve: hrReserve,
-                                  sampleDurationMin: sampleDur, b: b)
+                                  sampleDurationsMin: sampleDurs, b: b)
         case .edwards:
             trimp = edwardsTRIMP(hr, restingHR: restingHR, hrReserve: hrReserve,
-                                 sampleDurationMin: sampleDur)
+                                 sampleDurationsMin: sampleDurs)
         }
         return trimpToStrain(trimp, denominator: denominator)
     }

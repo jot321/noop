@@ -104,6 +104,62 @@ final class StrainScorerTests: XCTestCase {
         XCTAssertGreaterThan(s!, 0)
     }
 
+    /// The mixed-cadence day a WHOOP 5/MG produces all the time: a 1 Hz backfilled resting morning
+    /// followed by a real workout captured only as sparse ~30 s live samples. The old scorer stamped
+    /// EVERY sample with the first two samples' 1 s gap, so the run's 90 sparse samples integrated as
+    /// ~1.5 zone-minutes instead of ~45 — a genuine workout day collapsed to Effort ≈ 1. Time-weighted
+    /// integration must score the mixed day close to the same run represented densely at 1 Hz.
+    func testMixedCadenceDayDoesNotCollapseWorkoutLoad() {
+        // 2 h of 1 Hz rest (below zone 1 — contributes nothing) then a 45-min z5 run at 30 s cadence.
+        let restingMorning = hr(70, 7200, start: 0)
+        let sparseRun = hrEvery(175, 90, start: 7200)
+        let mixed = restingMorning + sparseRun
+        // The reference: the same 45-min run at 1 Hz (what a synced backfill would contain).
+        let denseRun = hr(175, 45 * 60, start: 7200)
+        let reference = StrainScorer.strain(restingMorning + denseRun, maxHR: 184, restingHR: 60)!
+
+        let mixedStrain = StrainScorer.strain(mixed, maxHR: 184, restingHR: 60)!
+        XCTAssertEqual(mixedStrain, reference, accuracy: 2.0,
+                       "a sparse-captured run must carry (almost) its full load")
+        // And the failure mode itself stays dead: nowhere near the collapsed ~1.
+        XCTAssertGreaterThan(mixedStrain, reference * 0.9)
+    }
+
+    /// The mirror image: a sparse 30 s opening must not inflate a later dense 1 Hz stretch 30×.
+    func testMixedCadenceDayDoesNotInflateDenseLoad() {
+        let sparseRest = hrEvery(70, 40, start: 0)                    // 20 min sparse rest (0 load)
+        let denseRun = hr(175, 45 * 60, start: 1200)                  // 45-min z5 run at 1 Hz
+        let mixed = sparseRest + denseRun
+        let reference = StrainScorer.strain(denseRun, maxHR: 184, restingHR: 60)!
+        let mixedStrain = StrainScorer.strain(mixed, maxHR: 184, restingHR: 60)!
+        XCTAssertEqual(mixedStrain, reference, accuracy: 2.0,
+                       "a dense run after a sparse stretch must not count each second as 30 s")
+    }
+
+    /// Off-wrist holes never accrue load: a high-HR sample right before a 3 h gap covers at most
+    /// `maxSampleGapS`, so strain barely moves versus the same stream without the gap.
+    func testOffWristGapDoesNotAccrueLoad() {
+        var samples = hrEvery(175, 40, start: 0)                      // 20 min sparse z5
+        samples.append(HRSample(ts: 3 * 3600, bpm: 175))              // one sample 3 h later
+        let withoutGap = StrainScorer.strain(hrEvery(175, 40, start: 0), maxHR: 184, restingHR: 60)!
+        let withGap = StrainScorer.strain(samples, maxHR: 184, restingHR: 60)!
+        XCTAssertEqual(withGap, withoutGap, accuracy: 3.0,
+                       "the 3 h hole must contribute at most maxSampleGapS of load")
+    }
+
+    /// Per-sample durations: own gap to next (clamped), last reuses previous, duplicates count 0.
+    func testSampleDurationsMinutes() {
+        let s = [HRSample(ts: 0, bpm: 100), HRSample(ts: 1, bpm: 100),
+                 HRSample(ts: 31, bpm: 100), HRSample(ts: 31, bpm: 100),
+                 HRSample(ts: 10_000, bpm: 100)]
+        let d = StrainScorer.sampleDurationsMinutes(s)
+        XCTAssertEqual(d[0], 1.0 / 60, accuracy: 1e-9)
+        XCTAssertEqual(d[1], 30.0 / 60, accuracy: 1e-9)
+        XCTAssertEqual(d[2], 0, accuracy: 1e-9)                       // duplicate ts
+        XCTAssertEqual(d[3], StrainScorer.maxSampleGapS / 60, accuracy: 1e-9) // capped long gap
+        XCTAssertEqual(d[4], d[3], accuracy: 1e-9)                    // last reuses previous
+    }
+
     func testEstimateHRmaxObservedVsTanaka() {
         // Thin history but known age → tanaka.
         let (v1, src1) = StrainScorer.estimateHRmax([150, 160, 170], age: 30)
