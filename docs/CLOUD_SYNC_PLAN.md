@@ -110,11 +110,11 @@ Extend `PrunePolicy`:
 
 ## 8. Phased delivery
 
-1. **Schema + settings:** `cloudCursor` migration, upload-state columns, BYO-S3 (shape A) settings UI + consent.
-2. **Upload sealed days** (raw + daily aggregates), idempotent, Wi-Fi+charging, with backfill.
-3. **Verified prune/downsample** of old local raw behind the retention setting.
-4. **On-demand hydration** for old days + long-range trend queries against the aggregate tier.
-5. **(Scale)** managed backend (shape B: Cognito / Lambda / S3+Athena / Timestream) if going multi-user.
+1. **Schema + settings** — SHIPPED: `cloudObject` ledger migration (v23), BYO-S3 (shape A) settings UI + consent (`CloudSyncCard`).
+2. **Upload sealed days** — SHIPPED: idempotent seal→upload→hash-verify (`CloudUploader`), backfill from the oldest day, plus AUTOMATIC daily-ish runs (`CloudSyncScheduler`): iOS `BGProcessingTask` gated on external power + network with a foreground catch-up, macOS hourly timer with a 20 h spacing guard, both restricted to unmetered/unconstrained network paths. Opt-in (`autoSync`, default OFF).
+3. **Verified prune/downsample** — SHIPPED: `downsampleAndPruneCloudDay` behind the retention setting, 1-min `minuteAgg` echo kept locally.
+4. **On-demand hydration** — SHIPPED for the Deep Timeline: a pruned window renders the `minuteAgg` echo (flagged "cloud echo"), and an explicit "Restore" tap re-downloads, ledger-hash-verifies and re-imports the day's raw (`CloudHydrator` → `WhoopStore.importCloudDayPayload`). Hydration clears `prunedAt`, so restored raw is a temporary cache the next pass re-prunes. Long-range trend queries against the aggregate tier remain open.
+5. **(Scale)** managed backend (shape B: Cognito / Lambda / S3+Athena / Timestream) if going multi-user — open.
 
 ## 9. Testing
 

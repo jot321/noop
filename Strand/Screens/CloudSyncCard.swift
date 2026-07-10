@@ -98,14 +98,36 @@ struct CloudSyncCard: View {
     }
 
     private var retentionRow: some View {
-        HStack {
-            Text("Keep on device").font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-            Spacer()
-            Stepper(value: $settings.retentionDays, in: 14...365, step: 7) {
-                Text("\(settings.retentionDays) days").font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            HStack {
+                Text("Keep on device").font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                Spacer()
+                Stepper(value: $settings.retentionDays, in: 14...365, step: 7) {
+                    Text("\(settings.retentionDays) days").font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                }
+                .fixedSize()
             }
-            .fixedSize()
+            Toggle(isOn: $settings.autoSync) {
+                Text("Sync automatically").font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+            }
+            .toggleStyle(.switch).tint(StrandPalette.accent)
+            .onChangeCompat(of: settings.autoSync) { on in
+                if on { CloudSyncScheduler.activateIfEnabled() } else { CloudSyncScheduler.cancelSchedule() }
+            }
+            Text(autoSyncBlurb)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// Honest per-platform copy about when automatic runs actually happen.
+    private var autoSyncBlurb: String {
+        #if os(iOS)
+        return String(localized: "Runs about once a day: in the background while your iPhone charges on an unmetered network (when iOS allows), and as a catch-up when you open the app. Never over cellular.")
+        #else
+        return String(localized: "Runs about once a day while the app is open, over unmetered networks only.")
+        #endif
     }
 
     private var actionButtons: some View {

@@ -60,6 +60,8 @@ public final class CloudSyncSettings: ObservableObject {
         static let prefix = "cloud.prefix"
         static let retentionDays = "cloud.retentionDays"
         static let lastSyncAt = "cloud.lastSyncAt"
+        static let autoSync = "cloud.autoSync"
+        static let lastAutoSyncAt = "cloud.lastAutoSyncAt"
     }
 
     /// Master switch. When false the uploader never runs.
@@ -74,10 +76,20 @@ public final class CloudSyncSettings: ObservableObject {
     @Published public var prefix: String { didSet { d.set(prefix, forKey: Keys.prefix) } }
     /// Days of full-resolution decoded data kept on device before an uploaded+verified day is pruned.
     @Published public var retentionDays: Int { didSet { d.set(retentionDays, forKey: Keys.retentionDays) } }
+    /// Automatic daily-ish offload runs (CloudSyncScheduler) — opt-in, default OFF like every NOOP
+    /// automation. Manual "Sync now" is unaffected by this switch.
+    @Published public var autoSync: Bool { didSet { d.set(autoSync, forKey: Keys.autoSync) } }
 
     public var lastSyncAt: Date? {
         get { let t = d.double(forKey: Keys.lastSyncAt); return t > 0 ? Date(timeIntervalSince1970: t) : nil }
         set { d.set(newValue?.timeIntervalSince1970 ?? 0, forKey: Keys.lastSyncAt) }
+    }
+
+    /// When the last AUTOMATIC run completed (drives the scheduler's due check, separate from
+    /// `lastSyncAt` so a manual "Sync now" doesn't silently postpone the scheduled pass).
+    public var lastAutoSyncAt: Date? {
+        get { let t = d.double(forKey: Keys.lastAutoSyncAt); return t > 0 ? Date(timeIntervalSince1970: t) : nil }
+        set { d.set(newValue?.timeIntervalSince1970 ?? 0, forKey: Keys.lastAutoSyncAt) }
     }
 
     private let d = UserDefaults.standard
@@ -91,6 +103,7 @@ public final class CloudSyncSettings: ObservableObject {
         prefix = d.string(forKey: Keys.prefix) ?? "noop"
         let r = d.integer(forKey: Keys.retentionDays)
         retentionDays = r > 0 ? r : 60
+        autoSync = d.bool(forKey: Keys.autoSync)
     }
 
     /// True once every field needed to talk to S3 is present.

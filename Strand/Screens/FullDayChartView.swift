@@ -54,6 +54,15 @@ struct FullDayChartView: View {
     /// Bumped on every settled zoom/metric change so the re-read task re-runs at the new resolution.
     @State private var reloadTick = 0
 
+    // Cloud offload restore path (docs/CLOUD_SYNC_PLAN.md §6): the UTC days in the visible window
+    // whose 1 Hz raw was offloaded + pruned. Non-empty → the chart is drawing the 1-minute echo (or
+    // nothing, for tracks that can't echo) and the restore affordance appears.
+    @State private var prunedCloudDays: [String] = []
+    @State private var hydrating = false
+    /// Bumped when a hydration lands so `taskKey` re-reads the window at full resolution.
+    @State private var hydrateTick = 0
+    @ObservedObject private var cloudSettings = CloudSyncSettings.shared
+
     /// The full clamp the zoom window can never escape — the selected calendar day.
     private var dayBounds: ClosedRange<Date> {
         dayStart...dayStart.addingTimeInterval(86_400)
@@ -76,6 +85,7 @@ struct FullDayChartView: View {
             dayNav
             sourcePill
             chartCard
+            cloudRestoreBanner
             zoomHint
         }
         .task(id: taskKey) { await reload() }
@@ -95,7 +105,7 @@ struct FullDayChartView: View {
     private var taskKey: String {
         let lo = Int(visibleWindow.lowerBound.timeIntervalSince1970)
         let hi = Int(visibleWindow.upperBound.timeIntervalSince1970)
-        return "\(metric.rawValue)|\(Int(dayStart.timeIntervalSince1970))|\(ownedOnly)|\(lo)|\(hi)|\(repo.refreshSeq)"
+        return "\(metric.rawValue)|\(Int(dayStart.timeIntervalSince1970))|\(ownedOnly)|\(lo)|\(hi)|\(repo.refreshSeq)|\(hydrateTick)"
     }
 
     // MARK: Controls
@@ -264,6 +274,55 @@ struct FullDayChartView: View {
         .padding(.horizontal, NoopMetrics.space6)
     }
 
+    /// Cloud restore affordance — shown only when the visible window overlaps days whose raw was
+    /// offloaded + pruned. With sync active it restores those days' 1 Hz raw from the bucket (an
+    /// explicit tap, never a silent fetch on scroll); the chart then re-reads at full resolution.
+    /// The restored raw is a temporary cache: the next offload pass re-prunes it past retention.
+    @ViewBuilder private var cloudRestoreBanner: some View {
+        if !prunedCloudDays.isEmpty {
+            HStack(spacing: NoopMetrics.rowSpacing) {
+                Image(systemName: "icloud.and.arrow.down")
+                    .font(StrandFont.footnote.weight(.medium))
+                    .foregroundStyle(StrandPalette.accent)
+                Text(cloudSettings.isActive
+                     ? "Per-second data for this window is in your cloud bucket."
+                     : "Per-second data was offloaded. Enable cloud sync in Settings to restore it.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                if cloudSettings.isActive {
+                    if hydrating {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("Restore") { restoreFromCloud() }
+                            .font(StrandFont.footnote.weight(.semibold))
+                            .foregroundStyle(StrandPalette.accent)
+                            .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, NoopMetrics.space2)
+            .padding(.vertical, NoopMetrics.space1)
+            .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+
+    /// Download + verify + re-import every pruned (day, stream) in the visible window, then bump
+    /// `hydrateTick` so the chart re-reads (the pruned-day check re-runs too, clearing the banner).
+    private func restoreFromCloud() {
+        guard !hydrating else { return }
+        hydrating = true
+        let window = visibleWindow
+        Task {
+            _ = await repo.hydrateFromCloud(
+                from: Int(window.lowerBound.timeIntervalSince1970),
+                to: Int(window.upperBound.timeIntervalSince1970))
+            hydrating = false
+            hydrateTick += 1
+        }
+    }
+
     @ViewBuilder private var zoomHint: some View {
         HStack(spacing: NoopMetrics.space2) {
             Image(systemName: zoomDomain == nil ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
@@ -320,9 +379,14 @@ struct FullDayChartView: View {
             to: Int(window.upperBound.timeIntervalSince1970),
             targetPoints: 600
         )
+        // The restore affordance rides the same read: which visible UTC days are pruned to the cloud?
+        let pruned = await repo.cloudPrunedDays(
+            from: Int(window.lowerBound.timeIntervalSince1970),
+            to: Int(window.upperBound.timeIntervalSince1970))
         // Guard against a stale task landing after the user moved on.
         guard !Task.isCancelled else { return }
         series = result
+        prunedCloudDays = pruned
         loading = false
     }
 
@@ -367,6 +431,11 @@ struct FullDayChartView: View {
         guard !series.points.isEmpty else { return "—" }
         if series.isRaw { return String(localized: "Raw · per second") }
         let m = series.bucketSeconds / 60
+        // Honest cloud-echo label: this line is the 1-minute aggregate kept after offload, not raw.
+        if series.isEcho {
+            return m > 1 ? String(localized: "\(m)-minute cloud echo")
+                         : String(localized: "1-minute cloud echo")
+        }
         return m >= 1 ? String(localized: "\(m)-minute average")
                       : String(localized: "\(series.bucketSeconds)-second average")
     }

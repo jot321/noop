@@ -136,6 +136,133 @@ final class CloudSyncTests: XCTestCase {
         XCTAssertEqual(cands.map(\.day).sorted(), ["2021-03-01", "2021-03-02"])
     }
 
+    // MARK: - Hydration (import a downloaded payload back into the raw tables)
+
+    /// The full offload → prune → hydrate loop: export a day, prune it, import the payload back, and
+    /// the raw rows are restored with the ledger's prunedAt cleared — so the day is re-prunable.
+    func testHydrationRoundTripRestoresPrunedDay() async throws {
+        let store = try await makeStore()
+        let day = "2021-03-04"
+        try await seedHR(store, deviceId: "dev1", day: day, count: 180)
+        let payload = try await store.exportCloudDayPayload(deviceId: "dev1", stream: "hrSample", day: day)!
+        try await store.recordCloudObjectUploaded(deviceId: "dev1", day: day, stream: "hrSample",
+                                                  objectKey: "k", sha256: "h", byteSize: payload.data.count,
+                                                  rowCount: payload.rowCount, at: 1)
+        try await store.markCloudObjectVerified(deviceId: "dev1", day: day, stream: "hrSample", at: 2)
+        _ = try await store.downsampleAndPruneCloudDay(deviceId: "dev1", stream: "hrSample", day: day, at: 5)
+        var rows = try await store.cloudDayRowCount(deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(rows, 0)
+
+        // Hydrate: every raw row comes back, byte-identical on a re-export.
+        let inserted = try await store.importCloudDayPayload(payload.data, deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(inserted, 180)
+        rows = try await store.cloudDayRowCount(deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(rows, 180)
+        let reExport = try await store.exportCloudDayPayload(deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(reExport?.data, payload.data)
+
+        // prunedAt cleared -> the day is a prune candidate again (hydration is a temporary cache).
+        let rec = try await store.cloudObject(deviceId: "dev1", day: day, stream: "hrSample")
+        XCTAssertNil(rec?.prunedAt)
+        XCTAssertEqual(rec?.state, "verified")
+        let again = try await store.downsampleAndPruneCloudDay(deviceId: "dev1", stream: "hrSample", day: day, at: 9)
+        XCTAssertEqual(again, .pruned(rowsDeleted: 180))
+    }
+
+    /// A second import of the same payload inserts nothing (INSERT OR IGNORE on the raw PK).
+    func testHydrationIsIdempotent() async throws {
+        let store = try await makeStore()
+        let day = "2021-03-04"
+        try await seedHR(store, deviceId: "dev1", day: day, count: 50)
+        let payload = try await store.exportCloudDayPayload(deviceId: "dev1", stream: "hrSample", day: day)!
+        let first = try await store.importCloudDayPayload(payload.data, deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(first, 0) // rows never left
+        let second = try await store.importCloudDayPayload(payload.data, deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(second, 0)
+        let rows = try await store.cloudDayRowCount(deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(rows, 50)
+    }
+
+    /// NULLs survive the round trip: a stepSample with no activityClass exports as an empty field and
+    /// hydrates back to NULL, not 0.
+    func testHydrationPreservesNulls() async throws {
+        let store = try await makeStore()
+        let day = "2021-03-04"
+        let start = CloudStreams.dayStartTs(day)!
+        var streams = Streams()
+        streams.steps = [StepSample(ts: start, counter: 100, activityClass: nil),
+                         StepSample(ts: start + 60, counter: 120, activityClass: 3)]
+        _ = try await store.insert(streams, deviceId: "dev1")
+        let payload = try await store.exportCloudDayPayload(deviceId: "dev1", stream: "stepSample", day: day)!
+        // Wipe and hydrate.
+        try await store.recordCloudObjectUploaded(deviceId: "dev1", day: day, stream: "stepSample",
+                                                  objectKey: "k", sha256: "h", byteSize: 1, rowCount: 2, at: 1)
+        try await store.markCloudObjectVerified(deviceId: "dev1", day: day, stream: "stepSample", at: 2)
+        _ = try await store.downsampleAndPruneCloudDay(deviceId: "dev1", stream: "stepSample", day: day, at: 5)
+        _ = try await store.importCloudDayPayload(payload.data, deviceId: "dev1", stream: "stepSample", day: day)
+        let back = try await store.stepSamples(deviceId: "dev1", from: start, to: start + 86_400, limit: 10)
+        XCTAssertEqual(back.map(\.activityClass), [nil, 3])
+        XCTAssertEqual(back.map(\.counter), [100, 120])
+    }
+
+    /// Wrong (stream, day, device) routing or a tampered header is refused outright.
+    func testHydrationRejectsHeaderMismatch() async throws {
+        let store = try await makeStore()
+        let day = "2021-03-04"
+        try await seedHR(store, deviceId: "dev1", day: day, count: 5)
+        let payload = try await store.exportCloudDayPayload(deviceId: "dev1", stream: "hrSample", day: day)!
+        // Same payload presented as a different day / stream / device — all refused, nothing inserted.
+        for (dev, stream, wrongDay) in [("dev1", "hrSample", "2021-03-05"),
+                                        ("dev1", "respSample", day),
+                                        ("dev2", "hrSample", day)] {
+            do {
+                _ = try await store.importCloudDayPayload(payload.data, deviceId: dev, stream: stream, day: wrongDay)
+                XCTFail("import should refuse a header mismatch")
+            } catch let e as CloudImportError {
+                XCTAssertEqual(e, .headerMismatch)
+            }
+        }
+        let dev2Rows = try await store.cloudDayRowCount(deviceId: "dev2", stream: "hrSample", day: day)
+        XCTAssertEqual(dev2Rows, 0)
+    }
+
+    /// A row whose timestamp escapes the day (or with the wrong field count) fails the whole import.
+    func testHydrationRejectsMalformedRows() async throws {
+        let store = try await makeStore()
+        let day = "2021-03-04"
+        let start = CloudStreams.dayStartTs(day)!
+        let csv = "noop-cloud,v=1,stream=hrSample,device=dev1,day=\(day),cols=ts,bpm\n\(start),60\n\(start + 86_400),61\n"
+        let data = try WhoopStore.compressCloudPayload(Data(csv.utf8))
+        do {
+            _ = try await store.importCloudDayPayload(data, deviceId: "dev1", stream: "hrSample", day: day)
+            XCTFail("import should refuse an out-of-day row")
+        } catch let e as CloudImportError {
+            XCTAssertEqual(e, .malformedRow(line: 3))
+        }
+        // Atomic: the valid first row was NOT inserted.
+        let rows = try await store.cloudDayRowCount(deviceId: "dev1", stream: "hrSample", day: day)
+        XCTAssertEqual(rows, 0)
+    }
+
+    /// The per-day pruned-object lookup returns only pruned rows for the asked days.
+    func testCloudPrunedObjectsFiltersByDayAndState() async throws {
+        let store = try await makeStore()
+        for (day, pruned) in [("2021-03-01", true), ("2021-03-02", false), ("2021-03-03", true)] {
+            try await seedHR(store, deviceId: "dev1", day: day, count: 60)
+            try await store.recordCloudObjectUploaded(deviceId: "dev1", day: day, stream: "hrSample",
+                                                      objectKey: "k-\(day)", sha256: "h", byteSize: 1, rowCount: 60, at: 1)
+            try await store.markCloudObjectVerified(deviceId: "dev1", day: day, stream: "hrSample", at: 2)
+            if pruned {
+                _ = try await store.downsampleAndPruneCloudDay(deviceId: "dev1", stream: "hrSample", day: day, at: 5)
+            }
+        }
+        let hits = try await store.cloudPrunedObjects(deviceId: "dev1", days: ["2021-03-01", "2021-03-02", "2021-03-04"])
+        XCTAssertEqual(hits.map(\.day), ["2021-03-01"])
+        XCTAssertEqual(hits.first?.objectKey, "k-2021-03-01")
+        let none = try await store.cloudPrunedObjects(deviceId: "dev1", days: [])
+        XCTAssertTrue(none.isEmpty)
+    }
+
     func testFillDailySpo2OnlyWhenNil() async throws {
         let store = try await makeStore()
         let day = "2021-03-04"

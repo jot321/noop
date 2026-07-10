@@ -46,8 +46,12 @@ struct StrandiOSApp: App {
         // target's BGTaskSchedulerPermittedIdentifiers (project.yml). Without this the overnight drop
         // never fires; the macOS timer, foreground catch-up, and "Run now" already work without it.
         ScheduledDebugExport.register()
+        // Cloud auto-sync BGProcessing handler — same launch-time registration rule as above. The
+        // scheduler stays inert unless the user opted into cloud sync AND automatic runs.
+        CloudSyncScheduler.register()
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
+        CloudSyncScheduler.install(model)
         _health = StateObject(wrappedValue: HealthKitBridge(
             repo: model.repo,
             appleDeviceId: model.appleDeviceId,
@@ -149,6 +153,9 @@ struct StrandiOSApp: App {
                 // Re-arm the strap's smart alarm on foreground: the firmware alarm is a single instant
                 // and iOS can't re-arm it while suspended, so it would otherwise fire once and stop.
                 model.applySmartAlarm()
+                // Cloud auto-sync foreground catch-up — the guaranteed path on iOS (the BGProcessing
+                // slot is best-effort). No-op unless opted in and a daily-ish run is due.
+                CloudSyncScheduler.activateIfEnabled()
                 Task {
                     health.refreshAuthIfPreviouslyGranted()
                     await health.sync()

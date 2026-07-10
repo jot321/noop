@@ -48,6 +48,9 @@ struct StrandApp: App {
                 .onChangeCompat(of: scenePhase) { phase in
                     if phase == .active {
                         model.setAppForeground(true)
+                        // Cloud auto-sync: arm the daily-ish timer + run a catch-up if due. Idempotent,
+                        // no-op unless the user opted into cloud sync AND automatic runs.
+                        CloudSyncScheduler.install(model)
                     } else if phase == .background || phase == .inactive {
                         model.setAppForeground(false)
                         model.flushPerformanceState()

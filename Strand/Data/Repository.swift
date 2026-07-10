@@ -1343,11 +1343,14 @@ final class Repository: ObservableObject {
     }
 
     /// One Deep-Timeline read: the plotted points plus whether they came from raw seconds or coarse
-    /// buckets (the view shows the resolution honestly) and the bucket width used.
+    /// buckets (the view shows the resolution honestly) and the bucket width used. `isEcho` marks the
+    /// cloud-offload fallback — the 1-minute `minuteAgg` echo of a pruned day, not the raw signal —
+    /// so the view can label the resolution honestly and offer the restore path.
     struct TimelineSeries: Sendable {
         var points: [TrendPoint]
         var isRaw: Bool
         var bucketSeconds: Int
+        var isEcho = false
         static let empty = TimelineSeries(points: [], isRaw: false, bucketSeconds: 0)
     }
 
@@ -1411,11 +1414,21 @@ final class Repository: ObservableObject {
                 let points = await Task.detached(priority: .utility) {
                     Self.dedupSortRawHr(perId)
                 }.value
+                if points.isEmpty,
+                   let echo = await timelineEchoSeries(metric: .hr, store: store, unionIds: unionIds,
+                                                       familyById: [:], from: from, to: to, bucket: bucket) {
+                    return echo
+                }
                 return TimelineSeries(points: points, isRaw: true, bucketSeconds: 1)
             }
             var byStart: [Int: HRBucket] = [:]
             for id in unionIds {
                 for b in (try? await store.hrBuckets(deviceId: id, from: from, to: to, bucketSeconds: bucket)) ?? [] where byStart[b.ts] == nil { byStart[b.ts] = b }
+            }
+            if byStart.isEmpty,
+               let echo = await timelineEchoSeries(metric: .hr, store: store, unionIds: unionIds,
+                                                   familyById: [:], from: from, to: to, bucket: bucket) {
+                return echo
             }
             return TimelineSeries(points: byStart.values.sorted { $0.ts < $1.ts }.map {
                 TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm)
@@ -1439,7 +1452,13 @@ final class Repository: ObservableObject {
         let points = await Task.detached(priority: .utility) {
             Self.dedupSortDownsampleRaw(perId, isRaw: isRaw, bucketSeconds: bucket)
         }.value
-        guard !points.isEmpty else { return TimelineSeries(points: [], isRaw: isRaw, bucketSeconds: bucket) }
+        guard !points.isEmpty else {
+            if let echo = await timelineEchoSeries(metric: metric, store: store, unionIds: unionIds,
+                                                   familyById: familyById, from: from, to: to, bucket: bucket) {
+                return echo
+            }
+            return TimelineSeries(points: [], isRaw: isRaw, bucketSeconds: bucket)
+        }
         return TimelineSeries(points: points, isRaw: isRaw, bucketSeconds: isRaw ? 1 : bucket)
     }
 
@@ -1518,6 +1537,100 @@ final class Repository: ObservableObject {
                 s.map { Self.timelinePoint($0.ts, Double($0.state)) }
             }.value
         }
+    }
+
+    // MARK: - Cloud-echo fallback (pruned days)
+    //
+    // When cloud offload has pruned a day's 1 Hz raw (docs/CLOUD_SYNC_PLAN.md §5), the store keeps a
+    // per-minute min/mean/max echo in `minuteAgg`. A Deep-Timeline window whose raw read came back
+    // EMPTY falls back to that echo so a pruned day still renders a real (1-minute) line instead of
+    // the "nothing here" state — flagged `isEcho` so the view labels the resolution honestly and can
+    // offer the cloud restore. `.hrv` never echoes: a windowed rMSSD cannot be derived from per-minute
+    // mean R-R, so only hydration brings that track back.
+
+    /// The 1-minute echo for `metric` over `[from, to]`, or nil when the echo has no rows either
+    /// (a genuinely empty window — off-wrist, never synced). First-id-wins per minute across
+    /// `unionIds`, mirroring the raw paths' dedup.
+    private func timelineEchoSeries(metric: TimelineMetric, store: WhoopStore, unionIds: [String],
+                                    familyById: [String: DeviceFamily], from: Int, to: Int,
+                                    bucket: Int) async -> TimelineSeries? {
+        var byTs: [Int: Double] = [:]
+        for id in unionIds {
+            let values = await timelineEchoValues(metric: metric, store: store, source: id,
+                                                  family: familyById[id] ?? .whoop5, from: from, to: to)
+            for (ts, v) in values where byTs[ts] == nil { byTs[ts] = v }
+        }
+        guard !byTs.isEmpty else { return nil }
+        var points = byTs.keys.sorted().map { Self.timelinePoint($0, byTs[$0]!) }
+        // The echo is 1-minute grain; a zoomed-out window still bins to the shared bucket grid so the
+        // line density matches what the raw path would have drawn.
+        if bucket > 60 { points = Self.downsampleToBuckets(points, bucketSeconds: bucket) }
+        return TimelineSeries(points: points, isRaw: false, bucketSeconds: max(60, bucket), isEcho: true)
+    }
+
+    /// Per-minute echo values for one source, keyed by minute ts — each metric mapped exactly like its
+    /// raw path (`timelineRawMetric`), but from the `minuteAgg` mean: HR coalesces measured over PPG,
+    /// SpO₂ plots the mean-red/mean-IR ratio proxy, skin temp converts family-aware raw→°C, motion is
+    /// the magnitude of the per-axis mean gravity vector.
+    private func timelineEchoValues(metric: TimelineMetric, store: WhoopStore, source: String,
+                                    family: DeviceFamily, from: Int, to: Int) async -> [Int: Double] {
+        func mean(_ stream: String) async -> [Int: Double] {
+            let rows = (try? await store.minuteAggSeries(deviceId: source, stream: stream, from: from, to: to)) ?? []
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0.ts, $0.meanV) })
+        }
+        switch metric {
+        case .hr:
+            var out = await mean("hrSample")
+            for (ts, v) in await mean("ppgHrSample") where out[ts] == nil { out[ts] = v }
+            return out
+        case .hrv:
+            return [:]
+        case .spo2:
+            let red = await mean("spo2Sample.red"), ir = await mean("spo2Sample.ir")
+            var out: [Int: Double] = [:]
+            for (ts, r) in red { if let i = ir[ts], i > 0 { out[ts] = r / i } }
+            return out
+        case .skinTemp:
+            return await mean("skinTempSample").mapValues {
+                skinTempCelsius(raw: Int($0.rounded()), family: family)
+            }
+        case .respiration:
+            return await mean("respSample")
+        case .motion:
+            let x = await mean("gravitySample.x"), y = await mean("gravitySample.y"), z = await mean("gravitySample.z")
+            var out: [Int: Double] = [:]
+            for (ts, xv) in x {
+                if let yv = y[ts], let zv = z[ts] { out[ts] = (xv * xv + yv * yv + zv * zv).squareRoot() }
+            }
+            return out
+        case .bandSleepState:
+            return await mean("sleepStateSample")
+        }
+    }
+
+    /// The UTC day-strings inside `[from, to)` whose raw was offloaded + pruned for any read source —
+    /// what the Deep Timeline uses to decide whether to offer "Restore from cloud". Empty when the
+    /// window is fully local.
+    func cloudPrunedDays(from: Int, to: Int) async -> [String] {
+        guard let store = await ensureStore() else { return [] }
+        let days = CloudHydrator.utcDays(from: from, to: to)
+        var pruned: Set<String> = []
+        for id in importedReadIds {
+            for obj in (try? await store.cloudPrunedObjects(deviceId: id, days: days)) ?? [] {
+                pruned.insert(obj.day)
+            }
+        }
+        return pruned.sorted()
+    }
+
+    /// Restore every pruned (day, stream) overlapping `[from, to)` from the user's bucket, or nil when
+    /// cloud sync isn't active/configured. Runs through `CloudHydrator` (ledger-hash-verified import).
+    func hydrateFromCloud(from: Int, to: Int) async -> CloudHydrator.Report? {
+        let settings = CloudSyncSettings.shared
+        guard settings.isActive, let config = settings.makeS3Config(),
+              let store = await ensureStore() else { return nil }
+        return await CloudHydrator.shared.hydrate(from: from, to: to, deviceIds: importedReadIds,
+                                                  store: store, client: S3Client(config: config))
     }
 
     /// Build a `TrendPoint` from a unix-seconds `ts` + value. `nonisolated static` so the per-row

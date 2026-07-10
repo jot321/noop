@@ -56,8 +56,11 @@ public actor CloudUploader {
         }
 
         // ── Seal + upload + verify each day/stream from oldest up to the seal ceiling ──
+        // Cancellation-cooperative: a background-task expiration cancels the wrapping Task, and the
+        // pass stops at the next day boundary (every completed upload/verify/prune is already durable).
         var day = oldest
         while day <= sealCeilingDay && day <= today {
+            if Task.isCancelled { return report }
             for spec in CloudStreams.all {
                 await uploadAndVerify(day: day, stream: spec.table, report: &report)
             }
@@ -68,6 +71,7 @@ public actor CloudUploader {
         // ── Prune verified days older than retention ──
         if let candidates = try? await store.cloudPruneCandidates(deviceId: deviceId, beforeDay: pruneCeilingDay) {
             for c in candidates {
+                if Task.isCancelled { return report }
                 let outcome = (try? await store.downsampleAndPruneCloudDay(
                     deviceId: deviceId, stream: c.stream, day: c.day, at: now())) ?? .notVerified
                 switch outcome {

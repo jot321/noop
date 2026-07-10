@@ -170,4 +170,50 @@ final class DeepTimelineFacadeTests: XCTestCase {
         XCTAssertGreaterThan(day.points.count, 0, "PPG-only day-scale read must not be empty")
         XCTAssertEqual(day.points.first?.value ?? 0, 55, accuracy: 0.001)
     }
+
+    /// A day whose 1 Hz raw was offloaded + pruned (cloud sync) must NOT render empty: the read falls
+    /// back to the 1-minute `minuteAgg` echo, flagged `isEcho` so the view labels it honestly — and a
+    /// hydration (re-import of the sealed payload) puts the raw path back in charge.
+    @MainActor
+    func testPrunedDayFallsBackToEchoAndHydrationRestoresRaw() async throws {
+        let store = try await WhoopStore.inMemory()
+        let dev = "my-whoop"
+        try await store.upsertDevice(id: dev, mac: nil, name: "WHOOP")
+        // 10 minutes of 1 Hz HR on a UTC day boundary so the whole window is one cloud day.
+        let day = "2026-05-01"
+        let base = CloudStreams.dayStartTs(day)!
+        let hr = (0..<600).map { HRSample(ts: base + $0, bpm: 60 + ($0 % 20)) }
+        try await store.insert(Streams(hr: hr), deviceId: dev)
+
+        // Offload + prune exactly like CloudUploader: export, ledger, verify, downsample+delete.
+        let payload = try await store.exportCloudDayPayload(deviceId: dev, stream: "hrSample", day: day)!
+        try await store.recordCloudObjectUploaded(deviceId: dev, day: day, stream: "hrSample",
+                                                  objectKey: "k", sha256: "h", byteSize: payload.data.count,
+                                                  rowCount: payload.rowCount, at: 1)
+        try await store.markCloudObjectVerified(deviceId: dev, day: day, stream: "hrSample", at: 2)
+        _ = try await store.downsampleAndPruneCloudDay(deviceId: dev, stream: "hrSample", day: day, at: 5)
+
+        let repo = Repository(deviceId: dev)
+        repo.setStoreForTesting(store)
+
+        // Zoomed-in window over the pruned stretch: raw is gone, the echo carries the line.
+        let echo = await repo.timelineSeries(metric: .hr, from: base, to: base + 600, targetPoints: 600)
+        XCTAssertTrue(echo.isEcho, "a pruned window must fall back to the minuteAgg echo")
+        XCTAssertFalse(echo.isRaw)
+        XCTAssertEqual(echo.bucketSeconds, 60)
+        XCTAssertEqual(echo.points.count, 10, "10 pruned minutes → 10 echo points")
+
+        // The pruned-day probe the restore affordance keys on sees exactly this day.
+        let pruned = await repo.cloudPrunedDays(from: base, to: base + 600)
+        XCTAssertEqual(pruned, [day])
+
+        // Hydrate (what CloudHydrator does after its download + hash check) → raw wins again.
+        _ = try await store.importCloudDayPayload(payload.data, deviceId: dev, stream: "hrSample", day: day)
+        let restored = await repo.timelineSeries(metric: .hr, from: base, to: base + 600, targetPoints: 600)
+        XCTAssertFalse(restored.isEcho)
+        XCTAssertTrue(restored.isRaw)
+        XCTAssertEqual(restored.points.count, 600, "hydration must bring back every raw second")
+        let prunedAfter = await repo.cloudPrunedDays(from: base, to: base + 600)
+        XCTAssertTrue(prunedAfter.isEmpty, "a hydrated day is no longer offered for restore")
+    }
 }

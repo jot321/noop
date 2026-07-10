@@ -105,6 +105,16 @@ public struct CloudLedgerSummary: Sendable {
     public let uploadedBytes: Int
 }
 
+/// Why a downloaded cloud payload was refused for import. The engine hash-verifies every object
+/// before calling import, so any of these means format drift or a wrong (day, stream) routing —
+/// fail loudly, never insert a misattributed row.
+public enum CloudImportError: Error, Equatable {
+    /// Line 1 isn't the exact header the exporter writes for this (deviceId, stream, day).
+    case headerMismatch
+    /// A data row has the wrong field count or an unparseable/out-of-day timestamp.
+    case malformedRow(line: Int)
+}
+
 extension WhoopStore {
 
     // MARK: - Payload compression (public wrappers over the outbox helpers)
@@ -314,6 +324,84 @@ extension WhoopStore {
                 UPDATE cloudObject SET prunedAt = ? WHERE deviceId = ? AND day = ? AND stream = ?
                 """, arguments: [now, deviceId, day, stream])
             return .pruned(rowsDeleted: deleted)
+        }
+    }
+
+    // MARK: - Hydration (re-import a downloaded payload for an on-demand look at a pruned day)
+
+    /// Pruned ledger rows for specific UTC days — the objects a viewer of that window could restore.
+    /// `days` is a small explicit list (a visible window spans at most a few UTC days).
+    public func cloudPrunedObjects(deviceId: String, days: [String]) async throws -> [CloudObjectRecord] {
+        guard !days.isEmpty else { return [] }
+        let placeholders = databaseQuestionMarks(count: days.count)
+        return try syncRead { db in
+            try Row.fetchAll(db, sql: """
+                SELECT * FROM cloudObject
+                WHERE deviceId = ? AND prunedAt IS NOT NULL AND day IN (\(placeholders))
+                ORDER BY day, stream
+                """, arguments: StatementArguments([deviceId] + days))
+                .map(Self.cloudObjectRecord(from:))
+        }
+    }
+
+    /// Re-import a downloaded, hash-verified payload for one pruned (stream, UTC day): decompress,
+    /// validate the exact header the exporter wrote, and INSERT OR IGNORE the raw rows back — all in
+    /// ONE transaction that also clears the ledger row's `prunedAt`. Clearing `prunedAt` is what makes
+    /// hydration a TEMPORARY cache: the day is `verified` and count-matched again, so the next offload
+    /// pass re-downsamples and re-prunes it once it ages past retention — eviction for free.
+    ///
+    /// Idempotent (a second import inserts 0 rows). Callers MUST hash-verify the object against the
+    /// ledger sha256 first; this validates format, not integrity. Returns the number of rows inserted.
+    @discardableResult
+    public func importCloudDayPayload(_ data: Data, deviceId: String, stream: String, day: String) async throws -> Int {
+        guard let spec = CloudStreams.spec(for: stream), let start = CloudStreams.dayStartTs(day) else {
+            throw CloudImportError.headerMismatch
+        }
+        let csv = try WhoopStore.zlibDecompressWithLength(data)
+        guard let text = String(data: csv, encoding: .utf8) else { throw CloudImportError.headerMismatch }
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: true)[...]
+        let expectedHeader = "noop-cloud,v=1,stream=\(spec.table),device=\(deviceId),day=\(day),cols=ts,\(spec.valueColumns.joined(separator: ","))"
+        guard lines.first.map(String.init) == expectedHeader else { throw CloudImportError.headerMismatch }
+        lines = lines.dropFirst()
+
+        // Parse OUTSIDE the write transaction so a malformed payload never holds the writer.
+        let fieldCount = 1 + spec.valueColumns.count
+        var rows: [[DatabaseValueConvertible?]] = []
+        rows.reserveCapacity(lines.count)
+        for (i, line) in lines.enumerated() {
+            let fields = line.split(separator: ",", omittingEmptySubsequences: false)
+            guard fields.count == fieldCount, let ts = Int(fields[0]),
+                  ts >= start, ts < start + 86_400 else {
+                throw CloudImportError.malformedRow(line: i + 2)
+            }
+            var args: [DatabaseValueConvertible?] = [deviceId, ts]
+            for f in fields.dropFirst() {
+                // Mirror the exporter's serialization: int64 / double / string, empty field = NULL
+                // (e.g. stepSample.activityClass) so absent stays absent through a round trip.
+                if f.isEmpty { args.append(nil) }
+                else if let v = Int(f) { args.append(v) }
+                else if let v = Double(f) { args.append(v) }
+                else { args.append(String(f)) }
+            }
+            rows.append(args)
+        }
+
+        let sql = """
+            INSERT OR IGNORE INTO \(spec.table)
+                (deviceId, ts, \(spec.valueColumns.joined(separator: ", ")))
+            VALUES (\(databaseQuestionMarks(count: fieldCount + 1)))
+            """
+        return try syncWrite { db in
+            let stmt = try db.cachedStatement(sql: sql)
+            var inserted = 0
+            for args in rows {
+                try stmt.execute(arguments: StatementArguments(args))
+                inserted += db.changesCount
+            }
+            try db.execute(sql: """
+                UPDATE cloudObject SET prunedAt = NULL WHERE deviceId = ? AND day = ? AND stream = ?
+                """, arguments: [deviceId, day, stream])
+            return inserted
         }
     }
 

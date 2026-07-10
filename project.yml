@@ -222,11 +222,17 @@ targets:
           # launch in StrandiOSApp.init) or the submit fails gracefully and only the foreground/"Run now"
           # paths run.
           - fetch
+          # Cloud auto-sync submits a BGProcessingTaskRequest (external power + network) so iOS can run
+          # the offload+prune pass while the phone charges. BGProcessing needs the "processing" mode; the
+          # task id below must also be permitted (and registered at launch in StrandiOSApp.init).
+          - processing
         # #510: permit the scheduled debug auto-export's BGAppRefreshTask identifier. MUST match
         # ScheduledDebugExport.bgTaskIdentifier EXACTLY and be registered at launch (StrandiOSApp.init);
-        # otherwise iOS refuses to schedule or deliver the background drop.
+        # otherwise iOS refuses to schedule or deliver the background drop. Same rule for the cloud
+        # auto-sync id (CloudSyncScheduler.bgTaskIdentifier).
         BGTaskSchedulerPermittedIdentifiers:
           - com.jotsarup.noop.debugexport
+          - com.jotsarup.noop.cloudsync
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
         NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it."
         NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."

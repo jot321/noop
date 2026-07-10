@@ -41,6 +41,13 @@ There are **two** opt-in exceptions, both off by default:
    "delete remote data" action. The secret key is stored only in the Keychain
    (`CloudSecretStore`); the S3 client (`Strand/Cloud/`) is the only networking outside the AI
    Coach and lives in the app layer, not the shared packages (see §1.1 below).
+   Two further switches inside cloud sync, both also explicit: **automatic sync**
+   (`CloudSyncScheduler`, its own opt-in toggle, default OFF) runs the same upload+prune pass about
+   once a day — on iOS only while charging, and on both platforms only over unmetered,
+   unconstrained networks (an automatic run never touches cellular); and **restore from cloud**
+   (`CloudHydrator`) downloads a pruned day back *from your own bucket* only on an explicit
+   "Restore" tap in the Deep Timeline — never silently on scroll — and refuses any object whose
+   hash doesn't match the upload ledger.
 
 Apart from these two opt-ins, nothing else in the app ever touches the network, and your raw
 data never does.
