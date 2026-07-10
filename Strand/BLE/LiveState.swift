@@ -267,6 +267,16 @@ public final class LiveState: ObservableObject {
     }
     /// Rolling log of human-readable lines for the on-device verification checklist.
     @Published public var log: [String] = []
+    /// A stable identity for one line in the bounded log projection rendered by the Live screen.
+    public struct VisibleLogLine: Identifiable, Equatable {
+        public let id: UInt64
+        public let text: String
+    }
+    /// The Live screen only renders this bounded projection; `log` remains the complete export source.
+    @Published public private(set) var visibleLog: [VisibleLogLine] = []
+    /// Changes for every appended row, including after either log cap is reached, to drive autoscroll.
+    @Published public private(set) var newestVisibleLogID: UInt64?
+    private var nextVisibleLogID: UInt64 = 1
 
     // MARK: - Connection status (single source of truth, #266)
 
@@ -462,14 +472,23 @@ public final class LiveState: ObservableObject {
     /// short redacted string (~100 bytes), so the worst-case buffer is well under ~1 MB — bounded, never
     /// unbounded. Drives the Live log card AND the shareable `exportableLogText()`.
     static let maxLogLines = 5_000
+    static let maxVisibleLogLines = 200
 
     public func append(log line: String, domain: TestDomain? = nil) {
         // Tag inert when nil (today's behaviour, byte-identical). When tagged, prefix a compact,
         // parseable marker the export filters on. Redaction is STILL the only scrub point
         // (redactPii below); tagging happens BEFORE redaction so the scrub covers the whole line.
         let tagged = domain.map { "[\($0.id)] " + line } ?? line
-        log.append(Self.redactPii(tagged))
+        let redacted = Self.redactPii(tagged)
+        log.append(redacted)
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
+        let visibleLine = VisibleLogLine(id: nextVisibleLogID, text: redacted)
+        nextVisibleLogID += 1
+        visibleLog.append(visibleLine)
+        if visibleLog.count > Self.maxVisibleLogLines {
+            visibleLog.removeFirst(visibleLog.count - Self.maxVisibleLogLines)
+        }
+        newestVisibleLogID = visibleLine.id
         Self.persistTail(log)
         // #990: fold the Backfiller's per-session "session persisted N rows" summary into the persisted
         // ALL-TIME drained-rows tally, right here at the single log sink (no new BLE seam). The summary
