@@ -558,7 +558,7 @@ public final class BLEManager: NSObject, ObservableObject {
     private var lastDataAt = Date()
     /// Explicit app owners that want realtime data. The foreground Live screen is suppressed while the
     /// app backgrounds; workout/session/manual owners keep demand until they release.
-    private var realtimeDemandOwners = Set<RealtimeDemandOwner>()
+    private var realtimeOwnerCoordinator = RealtimeOwnerCoordinator()
     /// Scene foreground state, injected by AppModel from the platform scene hooks.
     private var appForeground = true
     /// True while the "Continuous HRV capture" preference wants the realtime stream held open even with
@@ -571,12 +571,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Last derived demand, retained so keep-alive can log passive window edges without conflating them
     /// with explicit owner demand.
     private var lastRealtimeDemand = RealtimeDemandOutput(toggleWanted: false, heavyWhoop4Wanted: false)
-    /// What we last told the strap for TOGGLE_REALTIME_HR. Cleared on disconnect; owner/passive intent is
-    /// retained separately so reconnect/post-bond can re-arm without acquiring another owner.
-    private var toggleRealtimeArmed = false
-    /// What we last told a WHOOP 4 for the heavy R10/R11 burst. This is separate from the toggle because
-    /// passive continuous-HRV capture may need the toggle while never needing R10/R11.
-    private var heavyWhoop4RealtimeArmed = false
+    /// Commands actually queued to CoreBluetooth. Cleared on disconnect; owner/passive intent is retained
+    /// separately so reconnect/post-bond can re-arm without acquiring another owner.
+    private var realtimeCommandSentState = RealtimeCommandSentState()
     /// #80 marginal-radio fallback: tracks consecutive arm-then-quick-timeout cycles. When it trips,
     /// `standardHRFallback` goes true and the next connect skips arming R10/R11 (relies on 0x2A37).
     private var marginalRadio = MarginalRadioDetector()
@@ -617,9 +614,6 @@ public final class BLEManager: NSObject, ObservableObject {
     /// 0x2A37 standard-HR profile. Per-session: set by the detector, cleared on a clean reconnect (a
     /// connection that actually carried data) or when the user re-opens Live / taps Start HR.
     private var standardHRFallback = false
-    /// Wall time we last armed the R10/R11 realtime burst this connection, to measure how soon a drop
-    /// follows the arm (the marginal-radio tell). nil until armed; cleared on disconnect.
-    private var realtimeArmedAt: Date?
     /// Last-offload-attempt time (unix seconds), persisted so the rate limiter survives relaunch
     /// (matches WHOOP's DATA_SYNC_WORKER_LAST_WORK_TIME watermark).
     static let backfillLastAtKey = "backfillLastAt"
@@ -1408,8 +1402,9 @@ public final class BLEManager: NSObject, ObservableObject {
     ///   - payload: Command payload bytes (default `[0x00]`).
     ///   - writeType: BLE write type; defaults to `.withoutResponse` so all existing call
     ///     sites are unaffected. Pass `.withResponse` for acked commands (e.g. historicalDataResult).
+    @discardableResult
     public func send(_ command: WhoopCommand, payload: [UInt8] = [0x00],
-                     writeType: CBCharacteristicWriteType = .withoutResponse) {
+                     writeType: CBCharacteristicWriteType = .withoutResponse) -> Bool {
         // #314 parity: CoreBluetooth already covers both Android defects here — this `p.state == .connected`
         // guard makes a write a no-op once the radio powers off (no DeadObjectException to crash on), and
         // centralManagerDidUpdateState publishes state.connected = false on .poweredOff, so the iOS/macOS UI
@@ -1417,7 +1412,7 @@ public final class BLEManager: NSObject, ObservableObject {
         guard state.connected, let p = peripheral, p.state == .connected, let ch = cmdCharacteristic else {
             let reason = state.connected ? "command characteristic unavailable" : "not connected"
             log("send(\(command.label)) ignored — \(reason)")
-            return
+            return false
         }
         // WHOOP 5.0/MG uses puffin (CRC16) command framing, not the WHOOP4 frame. The realtime-HR toggle
         // is hardware-confirmed (issue #17 — a 5/MG owner saw live HR over a public build), which proves
@@ -1450,7 +1445,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 // Reversible; driven only by setBroadcastHr(_:). (#181)
                 || (command == .setDeviceConfig && PuffinExperiment.broadcastHrEnabled) else {
                 log("send(\(command.label)) skipped — no WHOOP 5/MG framing for this command yet")
-                return
+                return false
             }
             // WHOOP 5/MG haptics differ from WHOOP 4.0 on BOTH the opcode AND the payload (#48, decoded
             // from the working "maverick" app's binary). Opcode: 0x13, not RUN_HAPTICS_PATTERN=79 (a real-MG
@@ -1470,15 +1465,16 @@ public final class BLEManager: NSObject, ObservableObject {
                 if historicalAckLogCounter == 1 || historicalAckLogCounter.isMultiple(of: 25) {
                     log("→ \(command.label) ack #\(historicalAckLogCounter) payload=\(hex(puffinPayload)) (puffin)")
                 }
-                return
+                return true
             }
             log("→ \(command.label) payload=\(hex(puffinPayload)) (puffin\(cmdNote))")
-            return
+            return true
         }
         seq = seq &+ 1
         let frame = command.frame(seq: seq, payload: payload)
         p.writeValue(Data(frame), for: ch, type: writeType)
         log("→ \(command.label) payload=\(hex(payload))")
+        return true
     }
 
     /// Point the Collector's live decode at the selected family. For a 5/MG, also install an identity
@@ -1969,12 +1965,11 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Replace the explicit realtime owner set. Set insertion/removal is handled in AppModel; BLEManager
     /// receives the resulting intent snapshot and reconciles it with scene state plus passive capture.
     func setRealtimeDemandOwners(_ owners: Set<RealtimeDemandOwner>) {
-        let addedOwners = owners.subtracting(realtimeDemandOwners)
-        realtimeDemandOwners = owners
+        let change = realtimeOwnerCoordinator.replace(with: owners)
         state.liveFeedActive = !owners.isEmpty
-        if !addedOwners.isEmpty {
-            // A fresh explicit owner is the user/app asking for the full realtime experience again. Give
-            // the WHOOP4 heavy stream another chance; passive capture never reaches this path.
+        if change.becameActive {
+            // The first explicit owner is the user/app asking for the full realtime experience again. Give
+            // the WHOOP4 heavy stream another chance; additional concurrent owners preserve fallback.
             marginalRadio.reset()
             standardHRFallback = false
             state.standardHRMode = nil
@@ -1988,10 +1983,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Re-send currently wanted realtime commands without acquiring an owner. Used on reconnect/bond
     /// transitions where the strap forgot sent state but AppModel owner intent is still valid.
     func rearmRealtimeIfWanted() {
-        let demand = currentRealtimeDemand(trigger: .postBond)
+        let demand = currentRealtimeDemand()
         guard demand.toggleWanted || demand.heavyWhoop4Wanted else { return }
         enableLiveNotifications(reason: "rearm realtime")
-        reconcileRealtime(trigger: .postBond, forceWantedCommands: true)
+        reconcileRealtime(forceWantedCommands: true)
     }
 
     /// Scene foreground changes suppress only the Live-screen owner. Workout, live-session and manual
@@ -2030,22 +2025,20 @@ public final class BLEManager: NSObject, ObservableObject {
             endMin: d.object(forKey: ContinuousHrvSchedule.quietEndKey) as? Int ?? ContinuousHrvSchedule.defaultEndMinutes)
     }
 
-    private func currentRealtimeDemand(trigger: RealtimeDemandReconcileTrigger = .inputChange)
-        -> RealtimeDemandOutput {
+    private func currentRealtimeDemand() -> RealtimeDemandOutput {
         RealtimeDemandPolicy.evaluate(
             deviceFamily: selectedModel.deviceFamily,
-            owners: realtimeDemandOwners,
+            owners: realtimeOwnerCoordinator.owners,
             appForeground: appForeground,
             passiveCaptureWanted: continuousCaptureWantsNow(),
-            marginalRadioFallback: standardHRFallback,
-            trigger: trigger
+            marginalRadioFallback: standardHRFallback
         )
     }
 
     private func heavyDemandIgnoringFallback() -> Bool {
         RealtimeDemandPolicy.evaluate(
             deviceFamily: selectedModel.deviceFamily,
-            owners: realtimeDemandOwners,
+            owners: realtimeOwnerCoordinator.owners,
             appForeground: appForeground,
             passiveCaptureWanted: continuousCaptureWantsNow(),
             marginalRadioFallback: false
@@ -2056,23 +2049,23 @@ public final class BLEManager: NSObject, ObservableObject {
     /// passive capture can hold the toggle open but never asks for R10/R11, WHOOP5/MG only gets the
     /// puffin toggle, and marginal-radio fallback suppresses heavy demand without dropping the toggle.
     @discardableResult
-    private func reconcileRealtime(trigger: RealtimeDemandReconcileTrigger = .inputChange,
-                                   forceWantedCommands: Bool = false)
+    private func reconcileRealtime(forceWantedCommands: Bool = false)
         -> RealtimeDemandOutput {
-        let demand = currentRealtimeDemand(trigger: trigger)
+        let demand = currentRealtimeDemand()
         lastRealtimeDemand = demand
 
         let heavyWanted = demand.heavyWhoop4Wanted
         let shouldSendHeavy = selectedModel.deviceFamily == .whoop4
             && state.connected
-            && (heavyWanted != heavyWhoop4RealtimeArmed || (forceWantedCommands && heavyWanted))
+            && realtimeCommandSentState.shouldSendHeavy(
+                wanted: heavyWanted,
+                forceWanted: forceWantedCommands
+            )
         if shouldSendHeavy {
-            heavyWhoop4RealtimeArmed = heavyWanted
-            send(.sendR10R11Realtime, payload: [heavyWanted ? 0x01 : 0x00])
-            realtimeArmedAt = heavyWanted ? Date() : nil
+            let queued = send(.sendR10R11Realtime, payload: [heavyWanted ? 0x01 : 0x00])
+            realtimeCommandSentState.recordHeavy(wanted: heavyWanted, queued: queued, at: Date())
         } else if selectedModel.deviceFamily != .whoop4 {
-            heavyWhoop4RealtimeArmed = false
-            realtimeArmedAt = nil
+            realtimeCommandSentState.clearHeavyForOtherFamily()
         }
 
         if selectedModel.deviceFamily == .whoop4,
@@ -2084,9 +2077,12 @@ public final class BLEManager: NSObject, ObservableObject {
         let canSendToggle = state.connected && (selectedModel.deviceFamily == .whoop4 || state.bonded)
         let toggleWanted = demand.toggleWanted
         if canSendToggle,
-           toggleWanted != toggleRealtimeArmed || (forceWantedCommands && toggleWanted) {
-            toggleRealtimeArmed = toggleWanted
-            send(.toggleRealtimeHR, payload: [toggleWanted ? 0x01 : 0x00])
+           realtimeCommandSentState.shouldSendToggle(
+               wanted: toggleWanted,
+               forceWanted: forceWantedCommands
+           ) {
+            let queued = send(.toggleRealtimeHR, payload: [toggleWanted ? 0x01 : 0x00])
+            realtimeCommandSentState.recordToggle(wanted: toggleWanted, queued: queued)
         }
 
         return demand
@@ -2292,7 +2288,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // time-dependent; keep-alive re-derives it even if no owner changed.
         let previousDemand = lastRealtimeDemand
         let demand = reconcileRealtime()
-        if keepRealtimeForData, realtimeDemandOwners.isEmpty,
+        if keepRealtimeForData, realtimeOwnerCoordinator.owners.isEmpty,
            previousDemand.toggleWanted != demand.toggleWanted {
             log(demand.toggleWanted
                 ? "Continuous HRV: overnight window opened; arming realtime toggle (#927)"
@@ -2305,10 +2301,11 @@ public final class BLEManager: NSObject, ObservableObject {
         // The 30s keep-alive may re-send a wanted WHOOP4 heavy command, but only from the derived heavy
         // demand. Passive toggle-only capture must never manufacture R10/R11 demand.
         if demand.heavyWhoop4Wanted {
-            heavyWhoop4RealtimeArmed = true
-            toggleRealtimeArmed = true
-            send(.sendR10R11Realtime, payload: [0x01])
-            send(.toggleRealtimeHR, payload: [0x01])
+            let armedAt = realtimeCommandSentState.heavyWhoop4ArmedAt ?? Date()
+            let heavyQueued = send(.sendR10R11Realtime, payload: [0x01])
+            realtimeCommandSentState.recordHeavy(wanted: true, queued: heavyQueued, at: armedAt)
+            let toggleQueued = send(.toggleRealtimeHR, payload: [0x01])
+            realtimeCommandSentState.recordToggle(wanted: true, queued: toggleQueued)
         }
         keepAliveTick += 1
         if keepAliveTick % 2 == 0 { send(.getBatteryLevel, payload: []) }  // ~every 60s
@@ -2813,8 +2810,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // the R10/R11 burst is the marginal-radio tell. Feed the detector; if it trips, the NEXT connect
         // skips the heavy arm (the flag is intentionally NOT reset on disconnect so it survives rescan).
         let timedOut = !intentionalDisconnect && error != nil
-        let sinceArm = realtimeArmedAt.map { Date().timeIntervalSince($0) }
-        if marginalRadio.connectionEnded(wasArmed: realtimeArmedAt != nil,
+        let heavyArmedAt = realtimeCommandSentState.heavyWhoop4ArmedAt
+        let sinceArm = heavyArmedAt.map { Date().timeIntervalSince($0) }
+        if marginalRadio.connectionEnded(wasArmed: heavyArmedAt != nil,
                                          secondsSinceArm: sinceArm,
                                          timedOut: timedOut) {
             standardHRFallback = true
@@ -2862,13 +2860,11 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         didBond = false
         // The strap forgets sent realtime state across disconnect. Clear only sent-state flags; explicit
         // owners and passive-capture preference are intent and must survive so reconnect can re-arm.
-        toggleRealtimeArmed = false
-        heavyWhoop4RealtimeArmed = false
-        lastRealtimeDemand = currentRealtimeDemand(trigger: .disconnectReset)
+        realtimeCommandSentState.resetForDisconnect()
+        lastRealtimeDemand = currentRealtimeDemand()
         whoop5SessionStarted = false
         clockRequested = false
         connectHandshakeDone = false
-        realtimeArmedAt = nil   // cleared after the marginal-radio detector above read it (#80)
         // Reset backfill state so the next connect starts a fresh offload (incl. the syncing pill —
         // a dropped link mid-offload must not leave "Syncing strap history…" stuck on, #77).
         backfillStarted = false
@@ -3242,7 +3238,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             enableLiveNotifications(reason: "post-bond 5/MG")   // standard HR/battery that failed pre-bond
             // Arm realtime HR with puffin framing when policy requests the toggle. WHOOP5/MG never sends
             // WHOOP4 R10/R11; owners and passive capture both map to the puffin toggle only.
-            reconcileRealtime(trigger: .postBond)
+            reconcileRealtime()
             startKeepAlive()                                    // re-subscribe + liveness watchdog
             // Kick the historical offload ONCE per connection — this is the 5/MG edition of the WHOOP4
             // connect-handshake (lines below). didWriteValueFor re-enters this `.whoop5` branch on EVERY
@@ -3321,9 +3317,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             send(.getClock, payload: [])
             send(.getClock, payload: [0x00])
         }
-        send(.sendR10R11Realtime, payload: [0x00])   // stop the type-43 realtime flood (BLE airtime/battery)
-        heavyWhoop4RealtimeArmed = false
-        realtimeArmedAt = nil
+        let heavyStopQueued = send(.sendR10R11Realtime, payload: [0x00])
+        realtimeCommandSentState.recordHeavy(wanted: false, queued: heavyStopQueued, at: Date())
         send(.getDataRange)                          // refresh the strap's stored range for the watchdog
         // Plain offload (no high-freq-sync), rate-limited (first connect always runs; reconnect-flaps are
         // throttled by BackfillPolicy). Deferred ~1.5s so SET_CLOCK/GET_DATA_RANGE round-trip first and
@@ -3335,7 +3330,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         enableLiveNotifications(reason: "post-bond")   // includes 0x2A37 standard HR — the fallback path
         // Re-derive demand at arm time: passive capture may want only the toggle, explicit owners may
         // want WHOOP4 heavy, and marginal-radio fallback suppresses only heavy demand.
-        reconcileRealtime(trigger: .postBond)
+        reconcileRealtime()
     }
 
     /// SET_CLOCK(10) payload — the 8-byte form `[seconds u32 LE][subseconds u32 LE]`, subseconds in

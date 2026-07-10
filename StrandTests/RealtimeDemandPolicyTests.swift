@@ -10,16 +10,14 @@ final class RealtimeDemandPolicyTests: XCTestCase {
                         owners: Set<RealtimeDemandOwner> = [],
                         foreground: Bool = true,
                         passiveCaptureWanted: Bool = false,
-                        marginalFallback: Bool = false,
-                        trigger: RealtimeDemandReconcileTrigger = .inputChange)
+                        marginalFallback: Bool = false)
         -> RealtimeDemandOutput {
         RealtimeDemandPolicy.evaluate(
             deviceFamily: family,
             owners: owners,
             appForeground: foreground,
             passiveCaptureWanted: passiveCaptureWanted,
-            marginalRadioFallback: marginalFallback,
-            trigger: trigger)
+            marginalRadioFallback: marginalFallback)
     }
 
     func testNoOwnerAndNoPassiveCaptureWantsNothing() {
@@ -117,16 +115,79 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         )
     }
 
-    func testPostBondAndDisconnectResetTriggersRetainOwnerDemandIntent() {
-        for trigger in [RealtimeDemandReconcileTrigger.postBond, .disconnectReset] {
-            XCTAssertEqual(
-                demand(owners: [.liveSession], foreground: false, trigger: trigger),
-                RealtimeDemandOutput(toggleWanted: true, heavyWhoop4Wanted: true)
-            )
-            XCTAssertEqual(
-                demand(passiveCaptureWanted: true, trigger: trigger),
-                RealtimeDemandOutput(toggleWanted: true, heavyWhoop4Wanted: false)
-            )
-        }
+    func testDroppedToggleSendDoesNotAdvanceSentState() {
+        var sentState = RealtimeCommandSentState()
+
+        sentState.recordToggle(wanted: true, queued: false)
+
+        XCTAssertFalse(sentState.toggleArmed)
+        XCTAssertTrue(sentState.shouldSendToggle(wanted: true))
+    }
+
+    func testDroppedHeavySendDoesNotAdvanceSentStateOrArmTimestamp() {
+        var sentState = RealtimeCommandSentState()
+
+        sentState.recordHeavy(wanted: true, queued: false,
+                              at: Date(timeIntervalSince1970: 123))
+
+        XCTAssertFalse(sentState.heavyWhoop4Armed)
+        XCTAssertNil(sentState.heavyWhoop4ArmedAt)
+        XCTAssertTrue(sentState.shouldSendHeavy(wanted: true))
+    }
+
+    func testPostBondCanArmAfterPreBondToggleAttemptWasDropped() {
+        var sentState = RealtimeCommandSentState()
+
+        sentState.recordToggle(wanted: true, queued: false)
+        XCTAssertTrue(sentState.shouldSendToggle(wanted: true))
+
+        sentState.recordToggle(wanted: true, queued: true)
+        XCTAssertTrue(sentState.toggleArmed)
+        XCTAssertFalse(sentState.shouldSendToggle(wanted: true))
+    }
+
+    func testDisconnectClearsSentStateButPreservesOwnerIntentForRearm() {
+        var owners = RealtimeOwnerCoordinator()
+        _ = owners.acquire(.liveSession)
+        var sentState = RealtimeCommandSentState()
+        sentState.recordToggle(wanted: true, queued: true)
+        sentState.recordHeavy(wanted: true, queued: true,
+                              at: Date(timeIntervalSince1970: 123))
+
+        sentState.resetForDisconnect()
+
+        XCTAssertFalse(sentState.toggleArmed)
+        XCTAssertFalse(sentState.heavyWhoop4Armed)
+        XCTAssertNil(sentState.heavyWhoop4ArmedAt)
+        XCTAssertEqual(owners.ownersForRearm, Set([.liveSession]))
+        XCTAssertTrue(sentState.shouldSendToggle(wanted: true))
+        XCTAssertTrue(sentState.shouldSendHeavy(wanted: true))
+    }
+
+    func testOfflineLiveAppearanceRecordsOwnerForLaterRearm() {
+        var owners = RealtimeOwnerCoordinator()
+
+        let change = owners.acquire(.liveScreen)
+
+        XCTAssertTrue(change.changed)
+        XCTAssertTrue(change.becameActive)
+        XCTAssertEqual(owners.ownersForRearm, Set([.liveScreen]))
+    }
+
+    func testOnlyFirstExplicitOwnerAcquisitionClearsFallback() {
+        var owners = RealtimeOwnerCoordinator()
+        var standardHRFallback = true
+
+        let first = owners.acquire(.liveScreen)
+        if first.becameActive { standardHRFallback = false }
+        XCTAssertFalse(standardHRFallback)
+
+        standardHRFallback = true
+        let second = owners.acquire(.workout)
+        if second.becameActive { standardHRFallback = false }
+
+        XCTAssertTrue(second.changed)
+        XCTAssertFalse(second.becameActive)
+        XCTAssertTrue(standardHRFallback)
     }
 }

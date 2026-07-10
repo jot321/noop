@@ -1013,32 +1013,32 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
 
     /// Explicit owners currently asking for realtime HR/R-R. A set makes duplicate appear/disappear
     /// events idempotent: reconnect can re-arm without acquiring, and one owner cannot leak a count.
-    @Published private var realtimeOwners = Set<RealtimeDemandOwner>()
+    @Published private var realtimeOwnerCoordinator = RealtimeOwnerCoordinator()
 
-    var hasActiveRealtimeExperience: Bool { !realtimeOwners.isEmpty }
-    var hasManualRealtimeControl: Bool { realtimeOwners.contains(.manualControl) }
+    var hasActiveRealtimeExperience: Bool { realtimeOwnerCoordinator.ownersForRearm != nil }
+    var hasManualRealtimeControl: Bool { realtimeOwnerCoordinator.owners.contains(.manualControl) }
 
     /// A realtime owner appeared. Arms on first active owner and only then blanks stale smoothing (#46),
     /// so a second concurrent owner cannot clear an already-live window.
     func acquireRealtime(_ owner: RealtimeDemandOwner) {
-        let wasEmpty = realtimeOwners.isEmpty
-        let inserted = realtimeOwners.insert(owner).inserted
-        guard inserted else { return }
-        if wasEmpty { resetSmoothing() }
-        ble.setRealtimeDemandOwners(realtimeOwners)
+        let change = realtimeOwnerCoordinator.acquire(owner)
+        guard change.changed else { return }
+        if change.becameActive { resetSmoothing() }
+        ble.setRealtimeDemandOwners(change.owners)
     }
 
     /// A realtime owner went away. The BLE layer derives whether toggle/heavy streams should actually
     /// stop, allowing passive continuous-HRV capture to keep only the lightweight toggle if needed.
     func releaseRealtime(_ owner: RealtimeDemandOwner) {
-        guard realtimeOwners.remove(owner) != nil else { return }
-        ble.setRealtimeDemandOwners(realtimeOwners)
+        let change = realtimeOwnerCoordinator.release(owner)
+        guard change.changed else { return }
+        ble.setRealtimeDemandOwners(change.owners)
     }
 
     /// Re-issue BLE realtime commands WITHOUT touching owners, used when a fresh connection/bond lands
     /// while intent already exists. Reconnect never acquires a second owner.
     func rearmRealtimeIfWanted() {
-        guard hasActiveRealtimeExperience else { return }
+        guard realtimeOwnerCoordinator.ownersForRearm != nil else { return }
         ble.rearmRealtimeIfWanted()
     }
 

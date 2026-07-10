@@ -704,8 +704,8 @@ private struct LiveScreenContent: View, Equatable {
     /// Live tab appeared: acquire the Live-screen realtime owner and pull a battery reading. Balanced by
     /// the single `.liveScreen` release on `.onDisappear`.
     private func refreshLiveSession() {
-        guard activeConnection else { return }
         model.acquireRealtime(.liveScreen)
+        guard activeConnection else { return }
         model.getBattery()
     }
 
