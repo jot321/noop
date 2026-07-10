@@ -3,6 +3,15 @@ import XCTest
 
 final class LogTailPersistenceTests: XCTestCase {
 
+    @MainActor
+    private final class FlushOwner: PerformanceStateFlushing {
+        private(set) var callCount = 0
+
+        func flushPerformanceState() {
+            callCount += 1
+        }
+    }
+
     private final class LockedEvents {
         private let lock = NSLock()
         private var events: [LogTailPersistence.WriteEvent] = []
@@ -132,6 +141,70 @@ final class LogTailPersistenceTests: XCTestCase {
         writer.flush()
 
         XCTAssertEqual(writer.persistedTail(), ["old-one", "old-two", "new"])
+    }
+
+    @MainActor
+    func testScheduledExportFlushesInstalledOwnerSynchronouslyBeforeReadingTail() async {
+        let owner = FlushOwner()
+        PerformanceFlushRegistry.install(owner)
+        var fallbackCalls = 0
+        var flushCountWhenTailWasRead = 0
+
+        let text = ScheduledDebugExport.preparedExportText(
+            logFallback: { fallbackCalls += 1 },
+            readTail: {
+                flushCountWhenTailWasRead = owner.callCount
+                return "persisted tail"
+            })
+
+        XCTAssertEqual(text, "persisted tail")
+        XCTAssertEqual(owner.callCount, 1)
+        XCTAssertEqual(flushCountWhenTailWasRead, 1)
+        XCTAssertEqual(fallbackCalls, 0)
+    }
+
+    @MainActor
+    func testPerformanceFlushRegistryDoesNotRetainOwnerAndFallsBackWhenItIsGone() async {
+        var owner: FlushOwner? = FlushOwner()
+        weak var weakOwner = owner
+        PerformanceFlushRegistry.install(owner!)
+
+        owner = nil
+
+        XCTAssertNil(weakOwner)
+        var fallbackCalls = 0
+        PerformanceFlushRegistry.flush(logFallback: { fallbackCalls += 1 })
+        XCTAssertEqual(fallbackCalls, 1)
+    }
+
+    @MainActor
+    func testLifecycleFlushObserverRunsSynchronouslyOnMainActor() async {
+        let center = NotificationCenter()
+        let name = Notification.Name("test.performanceFlush.sync")
+        let observers = PerformanceFlushObservers(center: center)
+        var calls = 0
+        observers.install(names: [name]) {
+            XCTAssertTrue(Thread.isMainThread)
+            calls += 1
+        }
+
+        center.post(name: name, object: nil)
+
+        XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testLifecycleFlushObserverRemovesTokensOnDeinit() async {
+        let center = NotificationCenter()
+        let name = Notification.Name("test.performanceFlush.cleanup")
+        var observers: PerformanceFlushObservers? = PerformanceFlushObservers(center: center)
+        var calls = 0
+        observers?.install(names: [name]) { calls += 1 }
+
+        observers = nil
+        center.post(name: name, object: nil)
+
+        XCTAssertEqual(calls, 0)
     }
 
     private func waitUntil(timeout: TimeInterval, _ condition: @escaping () -> Bool) -> Bool {

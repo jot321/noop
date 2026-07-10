@@ -3,6 +3,28 @@ import Foundation
 import BackgroundTasks
 #endif
 
+@MainActor
+protocol PerformanceStateFlushing: AnyObject {
+    func flushPerformanceState()
+}
+
+@MainActor
+enum PerformanceFlushRegistry {
+    private static weak var owner: (any PerformanceStateFlushing)?
+
+    static func install(_ owner: any PerformanceStateFlushing) {
+        self.owner = owner
+    }
+
+    static func flush(logFallback: () -> Void = { LiveState.flushPersistedLogTail() }) {
+        guard let owner else {
+            logFallback()
+            return
+        }
+        owner.flushPerformanceState()
+    }
+}
+
 /// The DAILY scheduled debug auto-export (#510 — maddognik) for Apple, in PARITY with Android's
 /// `DebugExportScheduler`.
 ///
@@ -151,6 +173,14 @@ enum ScheduledDebugExport {
 
     // MARK: - The export itself
 
+    static func preparedExportText(
+        logFallback: () -> Void = { LiveState.flushPersistedLogTail() },
+        readTail: () -> String = { LiveState.scheduledExportText() }
+    ) -> String {
+        PerformanceFlushRegistry.flush(logFallback: logFallback)
+        return readTail()
+    }
+
     /// Write the durable strap-log tail to `Documents/noop-strap-log-<yyMMdd-HHmm>.txt`, and (when the
     /// caller supplies one) copy the raw 5/MG capture beside it. Reuses the already-shipped writers (the
     /// durable tail from `LiveState`, the timestamped naming from `FileExport`) so a scheduled drop reads
@@ -164,8 +194,7 @@ enum ScheduledDebugExport {
         let stamp = FileExport.timestamp()
         let logURL = docs.appendingPathComponent("noop-strap-log-\(stamp).txt")
         do {
-            LiveState.flushPersistedLogTail()
-            try LiveState.scheduledExportText().write(to: logURL, atomically: true, encoding: .utf8)
+            try preparedExportText().write(to: logURL, atomically: true, encoding: .utf8)
         } catch {
             return nil
         }

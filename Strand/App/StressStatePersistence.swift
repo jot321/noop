@@ -1,6 +1,26 @@
 import Foundation
 import StrandAnalytics
 
+struct StressRRPacketWindow {
+    private(set) var values: [Int] = []
+    private let limit: Int
+
+    init(limit: Int = 120) {
+        self.limit = limit
+    }
+
+    @discardableResult
+    mutating func consume(_ packet: [Int]) -> Bool {
+        let fresh = packet.filter { $0 > 300 && $0 < 2_000 }
+        guard !fresh.isEmpty else { return false }
+        values.append(contentsOf: fresh)
+        if values.count > limit {
+            values.removeFirst(values.count - limit)
+        }
+        return true
+    }
+}
+
 final class StressStatePersistence {
     enum WriteEvent: Equatable {
         case store(StressOnsetDetector.State, isMainThread: Bool)

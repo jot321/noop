@@ -11,6 +11,36 @@ import UserNotifications
 import AppKit
 #endif
 
+final class PerformanceFlushObservers {
+    private let center: NotificationCenter
+    private var tokens: [NSObjectProtocol] = []
+
+    init(center: NotificationCenter = .default) {
+        self.center = center
+    }
+
+    func install(names: [Notification.Name], flush: @escaping @MainActor () -> Void) {
+        removeAll()
+        tokens = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                // Delivery is pinned to the main queue, so termination durability must complete inline.
+                MainActor.assumeIsolated {
+                    flush()
+                }
+            }
+        }
+    }
+
+    private func removeAll() {
+        tokens.forEach(center.removeObserver)
+        tokens.removeAll()
+    }
+
+    deinit {
+        removeAll()
+    }
+}
+
 /// Data source currently running an import from the Data Sources screen.
 enum DataSourceImportKind {
     case whoop
@@ -22,7 +52,7 @@ enum DataSourceImportKind {
 /// More subsystems (Repository, AnalyticsEngine, ImportCoordinator) get wired in here
 /// in later milestones.
 @MainActor
-final class AppModel: ObservableObject {
+final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// The live instance, so an AppIntent (Shortcuts) can reach the bonded strap rather than spinning
     /// up a dead second AppModel (which would start a duplicate BLE engine and never buzz). Set in
     /// init(); `weak` so an intent fired while NOOP is closed sees nil and asks the user to open it. (#42)
@@ -150,7 +180,7 @@ final class AppModel: ObservableObject {
     private var lastCoachZone: Int = -1
     // L3 stress-onset detector state: a rolling R-R buffer + the replay-safe detector state (persisted
     // via BiofeedbackPrefs so a relaunch can't re-fire), carried verbatim between evaluations.
-    private var rrBuf: [Int] = []
+    private var stressRRWindow = StressRRPacketWindow()
     private var stressState = BiofeedbackPrefs.loadStressState()
     private let stressStatePersistence = StressStatePersistence()
     // Legacy experimental stress-nudge state (the older `behavior.stressNudge` buzz path) , a slow HRV
@@ -195,7 +225,7 @@ final class AppModel: ObservableObject {
     @Published var bpm: Int?
     private var hrWindow: [(t: Date, v: Double)] = []
     private var hrCancellables = Set<AnyCancellable>()
-    private var lifecycleFlushObservers: [NSObjectProtocol] = []
+    private let lifecycleFlushObservers = PerformanceFlushObservers()
     /// Drives the READ spine off the registry's active device (#814 HIGH-1). A Devices-screen
     /// switch/remove/re-add calls `registry.setActive` DIRECTLY (not through `registerDevice`), so without
     /// this subscription the reads stayed pinned to whatever id was active at wiring time for the whole
@@ -332,6 +362,7 @@ final class AppModel: ObservableObject {
         rehydrateActiveWorkout()
 
         AppModel.shared = self   // publish for App Intents (Shortcuts) , see the static above (#42)
+        PerformanceFlushRegistry.install(self)
 
         // Seed the BLE client with the persisted "Continuous HRV capture" intent so `wantsRealtime`
         // reflects it from launch , the reconciler then arms the dense stream as soon as the strap bonds
@@ -666,10 +697,8 @@ final class AppModel: ObservableObject {
         #else
         let names: [Notification.Name] = []
         #endif
-        lifecycleFlushObservers = names.map { name in
-            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.flushPerformanceState() }
-            }
+        lifecycleFlushObservers.install(names: names) { [weak self] in
+            self?.flushPerformanceState()
         }
     }
 
@@ -804,10 +833,8 @@ final class AppModel: ObservableObject {
     ///     can't re-fire. Honest / non-clinical: "stress" is an autonomic proxy vs the user's own
     ///     baseline, never a diagnosis.
     private func evaluateStress(rrPacket: [Int]) {
-        let fresh = rrPacket.filter { $0 > 300 && $0 < 2000 }   // plausible R-R (30–200 bpm)
-        guard !fresh.isEmpty else { return }
-        rrBuf.append(contentsOf: fresh)
-        if rrBuf.count > 120 { rrBuf.removeFirst(rrBuf.count - 120) }
+        guard stressRRWindow.consume(rrPacket) else { return }
+        let rrBuf = stressRRWindow.values
 
         // ── Legacy experimental nudge (behavior.stressNudge) , unchanged behaviour, kept separate.
         if behavior.stressNudge, live.bonded, live.worn, rrBuf.count >= 20 {

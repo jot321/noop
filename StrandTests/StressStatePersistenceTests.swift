@@ -135,6 +135,23 @@ final class StressStatePersistenceTests: XCTestCase {
         XCTAssertEqual(BiofeedbackPrefs.loadStressState(from: defaults), .initial)
     }
 
+    func testRRPacketWindowConsumesOnlyPlausibleValuesFromSuppliedPacketOnce() {
+        var window = StressRRPacketWindow()
+
+        XCTAssertTrue(window.consume([800, 810, 250, 2_000]))
+
+        XCTAssertEqual(window.values, [800, 810])
+    }
+
+    func testRRPacketWindowDoesNotReplayPreviousPacketWhenNoNewRRValuesArrive() {
+        var window = StressRRPacketWindow()
+        XCTAssertTrue(window.consume([800, 810]))
+
+        XCTAssertFalse(window.consume([]))
+
+        XCTAssertEqual(window.values, [800, 810])
+    }
+
     private func waitUntil(timeout: TimeInterval, _ condition: @escaping () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
