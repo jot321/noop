@@ -1166,6 +1166,20 @@ private struct ActiveWorkoutLive: View {
     }
 }
 
+enum LiveLogScrollTrigger {
+    case initialMount
+    case visibleLogChanged
+}
+
+enum LiveLogScrollTarget {
+    static func resolve(for trigger: LiveLogScrollTrigger, newestVisibleLogID: UInt64?) -> UInt64? {
+        switch trigger {
+        case .initialMount, .visibleLogChanged:
+            return newestVisibleLogID
+        }
+    }
+}
+
 /// The strap log + export controls + Test Centre link. Owns LiveState so the streaming log lines
 /// re-render only this card. Wrapped in the liquid frosted card style.
 private struct LiveLogCard: View {
@@ -1196,8 +1210,11 @@ private struct LiveLogCard: View {
                     }
                 }
                 .frame(height: 200)
+                .onAppear {
+                    scrollToNewest(.initialMount, newestVisibleLogID: live.newestVisibleLogID, proxy: proxy)
+                }
                 .onChangeCompat(of: live.newestVisibleLogID) { id in
-                    if let id { proxy.scrollTo(id, anchor: .bottom) }
+                    scrollToNewest(.visibleLogChanged, newestVisibleLogID: id, proxy: proxy)
                 }
             }
 
@@ -1228,6 +1245,16 @@ private struct LiveLogCard: View {
     }
 
     // MARK: - Strap-log export (issue #17 — let macOS users share the log for bug reports)
+
+    private func scrollToNewest(_ trigger: LiveLogScrollTrigger,
+                                newestVisibleLogID: UInt64?,
+                                proxy: ScrollViewProxy) {
+        guard let target = LiveLogScrollTarget.resolve(
+            for: trigger,
+            newestVisibleLogID: newestVisibleLogID
+        ) else { return }
+        proxy.scrollTo(target, anchor: .bottom)
+    }
 
     // The strap-log text builder lives on LiveState (`exportableLogText()`) so the macOS Settings
     // shortcut shares the exact same output (#17 / #507). These stay as thin wrappers.

@@ -56,6 +56,26 @@ final class LiveLogProjectionTests: XCTestCase {
         XCTAssertTrue(live.exportableLogText().contains("line 1"))
     }
 
+    func testInitialMountScrollTargetUsesCurrentNewestVisibleID() {
+        XCTAssertEqual(
+            LiveLogScrollTarget.resolve(for: .initialMount, newestVisibleLogID: 42),
+            42
+        )
+    }
+
+    func testVisibleLogChangeScrollTargetUsesChangedNewestVisibleID() {
+        XCTAssertEqual(
+            LiveLogScrollTarget.resolve(for: .visibleLogChanged, newestVisibleLogID: 43),
+            43
+        )
+    }
+
+    func testScrollTargetIsNilWhenVisibleLogIsEmpty() {
+        XCTAssertNil(
+            LiveLogScrollTarget.resolve(for: .initialMount, newestVisibleLogID: nil)
+        )
+    }
+
     private func append(_ count: Int, to live: LiveState) {
         for number in 1...count {
             live.append(log: "line \(number)")
