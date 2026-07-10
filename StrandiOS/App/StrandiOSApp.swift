@@ -27,6 +27,7 @@ struct StrandiOSApp: App {
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
     /// Chart data-colour style (Titanium / Classic throwback). Re-colours gauges + charts.
     @AppStorage(ChartStyle.storageKey) private var chartStyleRaw = ChartStyle.titanium.rawValue
+    @AppStorage(UnitPrefs.liveActivityKey) private var liveActivityEnabled = true
 
     init() {
         #if DEBUG
@@ -87,6 +88,12 @@ struct StrandiOSApp: App {
                     updateLiveActivity(
                         connected: isConnected,
                         bpm: isConnected ? (model.bpm ?? model.live.heartRate) : nil
+                    )
+                }
+                .onChange(of: liveActivityEnabled) { _, _ in
+                    updateLiveActivity(
+                        connected: model.live.connected,
+                        bpm: model.bpm ?? model.live.heartRate
                     )
                 }
                 // #911/#759: republish the Home/Lock-Screen widget whenever the dashboard caches actually
@@ -169,6 +176,7 @@ struct StrandiOSApp: App {
         liveActivity.update(
             bpm: connected ? bpm : nil,
             connected: connected,
+            enabled: liveActivityEnabled,
             activeRealtimeExperience: model.hasActiveRealtimeExperience
         ) {
             // #911: anchor the Live Activity on the SAME shared `Repository.widgetAnchor` the

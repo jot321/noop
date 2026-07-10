@@ -7,7 +7,7 @@ import ActivityKit
 @MainActor
 final class LiveActivityController {
     private var activity: Activity<NOOPActivityAttributes>?
-    private var lastPush: Date?
+    private var reconciliation = LiveActivityReconciliationState()
     /// Cached `ActivityAuthorizationInfo` — `update` runs at ~1 Hz off the live HR stream, and
     /// instantiating this system bridge per tick is needless allocation. ActivityKit's auth status
     /// only changes via Settings, so caching for the controller's lifetime is safe.
@@ -29,6 +29,7 @@ final class LiveActivityController {
     func update(
         bpm: Int?,
         connected: Bool,
+        enabled: Bool,
         activeRealtimeExperience: Bool,
         scoreProvider: () -> (recovery: Int?, effort: Int?)
     ) {
@@ -43,11 +44,11 @@ final class LiveActivityController {
         let now = Date()
         let decision = LiveActivityUpdatePolicy.evaluate(
             hasExistingActivity: activity != nil,
-            enabled: UnitPrefs.liveActivityEnabled(),
+            enabled: enabled,
             connected: connected,
             bpm: bpm,
             activeRealtimeExperience: activeRealtimeExperience,
-            lastPush: lastPush,
+            lastPush: reconciliation.lastPush,
             now: now
         )
 
@@ -55,7 +56,7 @@ final class LiveActivityController {
         case .none:
             return
         case .end:
-            Task { await end() }
+            scheduleEnd()
             return
         case .start, .update:
             break
@@ -73,7 +74,7 @@ final class LiveActivityController {
         let staleDate = now.addingTimeInterval(Self.staleAfter)
 
         if let activity {
-            lastPush = now
+            reconciliation.recordPush(at: now)
             Task { await activity.update(ActivityContent(state: state, staleDate: staleDate)) }
         } else {
             // Set the start gate SYNCHRONOUSLY before any await so a second `update` arriving on the
@@ -87,7 +88,7 @@ final class LiveActivityController {
                     content: ActivityContent(state: state, staleDate: staleDate),
                     pushType: nil
                 )
-                lastPush = now
+                reconciliation.recordPush(at: now)
             } catch {
                 activity = nil
             }
@@ -95,15 +96,27 @@ final class LiveActivityController {
         }
     }
 
-    func end() async {
-        // End every NOOP Live Activity, not just our cached handle — covers a straggler from a prior
-        // session we never re-adopted (#341) and any rare duplicate. Iterating the live list is the
-        // only way to reach activities this controller instance never started.
-        for act in Activity<NOOPActivityAttributes>.activities {
-            await act.end(nil, dismissalPolicy: .immediate)
+    private func scheduleEnd() {
+        // Capture every currently existing activity before scheduling work, including stragglers and
+        // rare duplicates. A later activity is never added to this end plan.
+        let targets = Activity<NOOPActivityAttributes>.activities
+        activity = nil
+        let plan = reconciliation.planEnd(targetIDs: targets.map(\.id))
+
+        guard !targets.isEmpty else {
+            reconciliation.completeEnd(plan)
+            return
         }
-        self.activity = nil
-        lastPush = nil
+
+        Task {
+            guard reconciliation.shouldBeginEnd(plan) else { return }
+            for target in targets {
+                await target.end(nil, dismissalPolicy: .immediate)
+            }
+            // Completion only retires this token. Handle and push state were detached before the task,
+            // so actor re-entry during an await cannot clear a newer activity or cadence timestamp.
+            reconciliation.completeEnd(plan)
+        }
     }
 }
 #endif

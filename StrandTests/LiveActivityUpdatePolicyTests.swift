@@ -119,3 +119,43 @@ final class LiveActivityUpdatePolicyTests: XCTestCase {
         )
     }
 }
+
+final class LiveActivityReconciliationStateTests: XCTestCase {
+    func testNewPushInvalidatesUnstartedEndToken() {
+        var state = LiveActivityReconciliationState()
+        let plan = state.planEnd(targetIDs: ["old"])
+
+        state.recordPush(at: Date(timeIntervalSince1970: 1_001))
+
+        XCTAssertFalse(state.shouldBeginEnd(plan))
+    }
+
+    func testEndPlanCapturesOnlyTargetsPresentWhenPlanned() {
+        var state = LiveActivityReconciliationState()
+        var targetIDs = ["old-a", "old-b"]
+
+        let plan = state.planEnd(targetIDs: targetIDs)
+        targetIDs.append("new")
+
+        XCTAssertEqual(plan.targetIDs, ["old-a", "old-b"])
+    }
+
+    func testCurrentEndTokenBeginsAndCompletes() {
+        var state = LiveActivityReconciliationState()
+        let plan = state.planEnd(targetIDs: ["old"])
+
+        XCTAssertTrue(state.shouldBeginEnd(plan))
+        XCTAssertTrue(state.completeEnd(plan))
+        XCTAssertFalse(state.shouldBeginEnd(plan))
+    }
+
+    func testStaleCompletionCannotClearNewerPushState() {
+        let pushedAt = Date(timeIntervalSince1970: 1_002)
+        var state = LiveActivityReconciliationState()
+        let stalePlan = state.planEnd(targetIDs: ["old"])
+        state.recordPush(at: pushedAt)
+
+        XCTAssertFalse(state.completeEnd(stalePlan))
+        XCTAssertEqual(state.lastPush, pushedAt)
+    }
+}

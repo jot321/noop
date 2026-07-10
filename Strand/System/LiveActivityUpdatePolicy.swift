@@ -31,3 +31,42 @@ enum LiveActivityUpdatePolicy {
         return now.timeIntervalSince(lastPush) >= minimumInterval ? .update : .none
     }
 }
+
+/// Tracks pending Live Activity ends without depending on ActivityKit. End plans retain the exact
+/// target IDs captured by the controller, while a later successful push invalidates an unstarted plan.
+struct LiveActivityReconciliationState {
+    struct EndPlan: Equatable {
+        fileprivate let generation: UInt64
+        let targetIDs: [String]
+    }
+
+    private var generation: UInt64 = 0
+    private var pendingEndGeneration: UInt64?
+    private(set) var lastPush: Date?
+
+    init() {}
+
+    mutating func planEnd(targetIDs: [String]) -> EndPlan {
+        generation &+= 1
+        pendingEndGeneration = generation
+        lastPush = nil
+        return EndPlan(generation: generation, targetIDs: targetIDs)
+    }
+
+    mutating func recordPush(at date: Date) {
+        generation &+= 1
+        pendingEndGeneration = nil
+        lastPush = date
+    }
+
+    func shouldBeginEnd(_ plan: EndPlan) -> Bool {
+        generation == plan.generation && pendingEndGeneration == plan.generation
+    }
+
+    @discardableResult
+    mutating func completeEnd(_ plan: EndPlan) -> Bool {
+        guard shouldBeginEnd(plan) else { return false }
+        pendingEndGeneration = nil
+        return true
+    }
+}
