@@ -109,13 +109,13 @@ final class ActiveWorkoutPersistenceCoordinator {
     }
 
     func start(_ snapshot: ActiveWorkoutPersistence.Snapshot) {
-        queue.async { [self] in
-            generation &+= 1
-            active = true
-            dirty = false
-            latest = snapshot
-            invalidateTrailing()
-            store(snapshot, generation: generation)
+        syncOnQueue {
+            self.generation &+= 1
+            self.active = true
+            self.dirty = false
+            self.latest = snapshot
+            self.invalidateTrailing()
+            self.store(snapshot, generation: self.generation)
         }
     }
 

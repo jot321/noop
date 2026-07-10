@@ -64,6 +64,27 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         )
     }
 
+    func testEffectiveExplicitOwnersFollowSceneStateAndRestoreOnForeground() {
+        let allOwners = Set(RealtimeDemandOwner.allCases)
+
+        XCTAssertEqual(
+            RealtimeDemandPolicy.effectiveExplicitOwners(allOwners, appForeground: true),
+            allOwners
+        )
+        XCTAssertEqual(
+            RealtimeDemandPolicy.effectiveExplicitOwners([.liveScreen], appForeground: false),
+            []
+        )
+        XCTAssertEqual(
+            RealtimeDemandPolicy.effectiveExplicitOwners(allOwners, appForeground: false),
+            [.workout, .liveSession, .manualControl]
+        )
+        XCTAssertEqual(
+            RealtimeDemandPolicy.effectiveExplicitOwners([.liveScreen], appForeground: true),
+            [.liveScreen]
+        )
+    }
+
     func testOwnerCombinationsRemainActiveWhenAnyUnsuppressedOwnerWantsRealtime() {
         XCTAssertEqual(
             demand(owners: [.liveScreen, .workout], foreground: false),
@@ -130,7 +151,7 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         sentState.recordHeavy(wanted: true, queued: false,
                               at: Date(timeIntervalSince1970: 123))
 
-        XCTAssertFalse(sentState.heavyWhoop4Armed)
+        XCTAssertNil(sentState.heavyWhoop4Armed)
         XCTAssertNil(sentState.heavyWhoop4ArmedAt)
         XCTAssertTrue(sentState.shouldSendHeavy(wanted: true))
     }
@@ -161,7 +182,7 @@ final class RealtimeDemandPolicyTests: XCTestCase {
 
         XCTAssertEqual(plan, .none)
         XCTAssertFalse(sentState.toggleArmed)
-        XCTAssertFalse(sentState.heavyWhoop4Armed)
+        XCTAssertNil(sentState.heavyWhoop4Armed)
         XCTAssertNil(sentState.heavyWhoop4ArmedAt)
     }
 
@@ -183,7 +204,7 @@ final class RealtimeDemandPolicyTests: XCTestCase {
 
         XCTAssertEqual(plan, .none)
         XCTAssertTrue(sentState.toggleArmed)
-        XCTAssertTrue(sentState.heavyWhoop4Armed)
+        XCTAssertEqual(sentState.heavyWhoop4Armed, true)
         XCTAssertEqual(sentState.heavyWhoop4ArmedAt, armedAt)
     }
 
@@ -228,6 +249,100 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         )
     }
 
+    func testUnknownHeavyStopRemainsRetryableUntilSuccessfullyQueued() {
+        var sentState = RealtimeCommandSentState()
+        let demand = RealtimeDemandOutput(toggleWanted: false, heavyWhoop4Wanted: false)
+
+        XCTAssertNil(sentState.heavyWhoop4Armed)
+        var plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop4,
+            demand: demand,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+        XCTAssertEqual(plan.heavyWhoop4Wanted, false)
+
+        sentState.recordHeavy(wanted: false, queued: false, at: Date())
+        XCTAssertNil(sentState.heavyWhoop4Armed)
+        plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop4,
+            demand: demand,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+        XCTAssertEqual(plan.heavyWhoop4Wanted, false)
+
+        sentState.recordHeavy(wanted: false, queued: true, at: Date())
+        XCTAssertEqual(sentState.heavyWhoop4Armed, false)
+        XCTAssertFalse(sentState.shouldSendHeavy(wanted: false))
+    }
+
+    func testUnknownHeavyStartRecordsTrueAfterSuccessfulQueue() {
+        var sentState = RealtimeCommandSentState()
+
+        sentState.recordHeavy(
+            wanted: true,
+            queued: true,
+            at: Date(timeIntervalSince1970: 123)
+        )
+
+        XCTAssertEqual(sentState.heavyWhoop4Armed, true)
+        XCTAssertEqual(sentState.heavyWhoop4ArmedAt, Date(timeIntervalSince1970: 123))
+    }
+
+    func testDisconnectAndFamilyTransitionResetHeavyStateToUnknown() {
+        var sentState = RealtimeCommandSentState()
+        sentState.recordHeavy(wanted: true, queued: true, at: Date())
+
+        sentState.resetForDisconnect()
+        XCTAssertNil(sentState.heavyWhoop4Armed)
+
+        sentState.recordHeavy(wanted: false, queued: true, at: Date())
+        sentState.resetHeavyForFamilyTransition()
+        XCTAssertNil(sentState.heavyWhoop4Armed)
+    }
+
+    func testPassiveOnlyPostBondDemandPlansWhoop4StopAndToggleStart() {
+        let demand = self.demand(passiveCaptureWanted: true)
+
+        let plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop4,
+            demand: demand,
+            sentState: RealtimeCommandSentState(),
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+
+        XCTAssertEqual(
+            plan,
+            RealtimeCommandWritePlan(heavyWhoop4Wanted: false, toggleWanted: true)
+        )
+    }
+
+    func testWhoop5ClearsHeavyStateWithoutPlanningWhoop4Command() {
+        var sentState = RealtimeCommandSentState()
+        sentState.recordHeavy(wanted: true, queued: true, at: Date())
+        sentState.clearHeavyForOtherFamily()
+
+        let plan = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop5,
+            demand: RealtimeDemandOutput(toggleWanted: true, heavyWhoop4Wanted: false),
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+
+        XCTAssertNil(sentState.heavyWhoop4Armed)
+        XCTAssertNil(plan.heavyWhoop4Wanted)
+        XCTAssertEqual(plan.toggleWanted, true)
+    }
+
     func testDisconnectClearsSentStateButPreservesOwnerIntentForRearm() {
         var owners = RealtimeOwnerCoordinator()
         _ = owners.acquire(.liveSession)
@@ -239,7 +354,7 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         sentState.resetForDisconnect()
 
         XCTAssertFalse(sentState.toggleArmed)
-        XCTAssertFalse(sentState.heavyWhoop4Armed)
+        XCTAssertNil(sentState.heavyWhoop4Armed)
         XCTAssertNil(sentState.heavyWhoop4ArmedAt)
         XCTAssertEqual(owners.ownersForRearm, Set([.liveSession]))
         XCTAssertTrue(sentState.shouldSendToggle(wanted: true))
@@ -271,5 +386,56 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         XCTAssertTrue(second.changed)
         XCTAssertFalse(second.becameActive)
         XCTAssertTrue(standardHRFallback)
+    }
+}
+
+final class ActiveWorkoutRealtimeOwnershipTests: XCTestCase {
+    private func apply(
+        _ mutation: RealtimeOwnerMutation?,
+        to owners: inout RealtimeOwnerCoordinator
+    ) {
+        switch mutation {
+        case let .acquire(owner):
+            owners.acquire(owner)
+        case let .release(owner):
+            owners.release(owner)
+        case nil:
+            break
+        }
+    }
+
+    func testStartedWorkoutKeepsOwnerAfterSheetDismissal() {
+        var lifecycle = ActiveWorkoutRealtimeOwnership()
+        var owners = RealtimeOwnerCoordinator()
+
+        apply(lifecycle.workoutDidBegin(), to: &owners)
+        // Dismissing the sheet is deliberately not a workout-lifetime transition.
+
+        XCTAssertEqual(owners.owners, [.workout])
+        XCTAssertTrue(lifecycle.ownsRealtime)
+        XCTAssertNil(lifecycle.workoutDidBegin(), "Repeated start must not acquire twice")
+    }
+
+    func testRehydratedWorkoutAcquiresOwner() {
+        var lifecycle = ActiveWorkoutRealtimeOwnership()
+        var owners = RealtimeOwnerCoordinator()
+
+        apply(lifecycle.workoutDidBegin(), to: &owners)
+
+        XCTAssertEqual(owners.owners, [.workout])
+        XCTAssertTrue(lifecycle.ownsRealtime)
+    }
+
+    func testEndingWorkoutReleasesOwnerExactlyOnce() {
+        var lifecycle = ActiveWorkoutRealtimeOwnership()
+        var owners = RealtimeOwnerCoordinator()
+        apply(lifecycle.workoutDidBegin(), to: &owners)
+
+        apply(lifecycle.workoutWillEnd(), to: &owners)
+        let repeatedEnd = lifecycle.workoutWillEnd()
+
+        XCTAssertTrue(owners.owners.isEmpty)
+        XCTAssertFalse(lifecycle.ownsRealtime)
+        XCTAssertNil(repeatedEnd, "Repeated end must not release twice")
     }
 }

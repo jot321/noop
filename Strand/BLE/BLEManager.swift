@@ -11,6 +11,35 @@ import UIKit
 import AppKit
 #endif
 
+enum StandardHRPublicationEvent: Equatable {
+    case heartRate(Int)
+    case rrIntervals([Int])
+}
+
+enum StandardHRPublicationPlan {
+    static func events(
+        packetHR: Int,
+        rrIntervals: [Int],
+        currentHR: Int?
+    ) -> [StandardHRPublicationEvent] {
+        var events: [StandardHRPublicationEvent] = []
+        if (30...220).contains(packetHR), currentHR != packetHR {
+            events.append(.heartRate(packetHR))
+        }
+        if !rrIntervals.isEmpty {
+            events.append(.rrIntervals(rrIntervals))
+        }
+        return events
+    }
+}
+
+enum DisconnectCallbackFinalization {
+    static func run(diagnostics: () -> Void, disconnectEdge: () -> Void) {
+        diagnostics()
+        disconnectEdge()
+    }
+}
+
 /// Detects a marginal Bluetooth radio that can't sustain the WHOOP 4 R10/R11 raw realtime stream
 /// (#80). On a flaky radio (2016 Mac / OpenCore) the link dies the *instant* NOOP arms that
 /// high-bandwidth burst, then the auto-rescan reconnects, re-arms, and dies again — an endless loop.
@@ -445,6 +474,11 @@ public final class BLEManager: NSObject, ObservableObject {
         case noRedirect
         case keepScanningForPreferred(UUID)
         case redirectToRetrievedPeripheral(UUID)
+
+        var requiresFamilyDetection: Bool {
+            if case .redirectToRetrievedPeripheral = self { return true }
+            return false
+        }
     }
 
     /// Pure P1 planner for a late-arriving preferred peripheral pin. Redirection is deliberately narrow:
@@ -680,6 +714,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Non-nil signals that `centralManagerDidUpdateState` should reconnect this
     /// specific peripheral rather than starting a fresh scan.
     private var restoredPeripheral: CBPeripheral?
+    /// A late UUID redirect bypasses advertisement-based family selection. Until this target's services
+    /// arrive, discover both WHOOP primaries and derive framing from the service the strap actually exposes.
+    private var familyDetectionTargetUUID: UUID?
     private var cmdCharacteristic: CBCharacteristic?
     private var cmdNotifyCharacteristic: CBCharacteristic?
     private var eventNotifyCharacteristic: CBCharacteristic?
@@ -970,7 +1007,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // Connection test mode: stamp when this connect attempt began so didConnect can report the connect
         // latency. A plain Date() assignment, no behaviour change; only read behind the .connection gate.
         connectAttemptStartedAt = Date()
-        selectedModel = model
+        selectModel(model)
         // Battery "~X days left" fallback (#713): a 5/MG runs far longer than a 4.0, so point the estimator's
         // rated-life fallback at the connected family. The Today badge reads state.batteryEstimate (which uses
         // state.batteryRatedHours); without this it always assumed WHOOP 4.0 (108h).
@@ -1046,6 +1083,7 @@ public final class BLEManager: NSObject, ObservableObject {
     public func disconnect() {
         intentionalDisconnect = true
         cancelScanFallback()
+        familyDetectionTargetUUID = nil
         // A user-initiated teardown is a clean slate: clear any #80 marginal-radio fallback so the next
         // (manual) reconnect attempts the full R10/R11 stream again rather than inheriting old suspicion.
         marginalRadio.reset()
@@ -1222,8 +1260,11 @@ public final class BLEManager: NSObject, ObservableObject {
         }
         preferredPeripheralUUID = resolved
 
-        guard let resolved else { return }
-        let canAttemptRedirect = Self.preferredPeripheralRedirectPlan(
+        guard let resolved else {
+            familyDetectionTargetUUID = nil
+            return
+        }
+        let redirectPlan = Self.preferredPeripheralRedirectPlan(
             previousPin: previous,
             incomingPin: uuidString,
             isPresentingScan: isPresentingScan,
@@ -1232,7 +1273,7 @@ public final class BLEManager: NSObject, ObservableObject {
             isScanning: central.isScanning,
             autoReconnectPausedForBondLoop: autoReconnectPausedForBondLoop,
             retrievedTargetAvailable: true)
-        guard case .redirectToRetrievedPeripheral = canAttemptRedirect else { return }
+        guard case .redirectToRetrievedPeripheral = redirectPlan else { return }
 
         guard let target = central.retrievePeripherals(withIdentifiers: [resolved]).first else {
             if case .keepScanningForPreferred = Self.preferredPeripheralRedirectPlan(
@@ -1253,6 +1294,7 @@ public final class BLEManager: NSObject, ObservableObject {
         central.stopScan()
         log("Preferred strap \(resolved) applied during scan — redirecting to targeted reconnect")
         preparePeripheral(target)
+        familyDetectionTargetUUID = redirectPlan.requiresFamilyDetection ? target.identifier : nil
         central.connect(target, options: nil)
     }
 
@@ -1335,6 +1377,7 @@ public final class BLEManager: NSObject, ObservableObject {
             return
         }
         cancelScanFallback()            // no family-rotation timer should fire during a present-scan
+        familyDetectionTargetUUID = nil
         isPresentingScan = true
         discoveredWhoops = []           // fresh list each time the wizard opens the scan
         central.stopScan()
@@ -2401,15 +2444,38 @@ public final class BLEManager: NSObject, ObservableObject {
     }
 
     private func preparePeripheral(_ p: CBPeripheral) {
+        if let target = familyDetectionTargetUUID, target != p.identifier {
+            familyDetectionTargetUUID = nil
+        }
         peripheral = p
         p.delegate = self
         resetCharacteristics()
     }
 
     private func discoverPrimaryServices(on p: CBPeripheral) {
-        p.discoverServices([
-            selectedModel.scanService, BLEManager.heartRateService, BLEManager.batteryService,
-        ])
+        let plan = WhoopPrimaryServiceDiscoveryPlan.make(
+            selectedModel: selectedModel,
+            detectsFamily: familyDetectionTargetUUID == p.identifier
+        )
+        p.discoverServices(
+            plan.primaryServiceUUIDs + [BLEManager.heartRateService, BLEManager.batteryService]
+        )
+    }
+
+    private func configureDetectedFamily(_ model: WhoopModel) {
+        selectModel(model)
+        state.batteryRatedHours = model.deviceFamily == .whoop5
+            ? BatteryEstimator.ratedLifeHoursWhoop5 : BatteryEstimator.ratedLifeHoursWhoop4
+        reassembler = Reassembler(family: model.deviceFamily)
+        router.family = model.deviceFamily
+        configureCollectorFamily()
+    }
+
+    private func selectModel(_ model: WhoopModel) {
+        if selectedModel.deviceFamily != model.deviceFamily {
+            realtimeCommandSentState.resetHeavyForFamilyTransition()
+        }
+        selectedModel = model
     }
 
     private func resetCharacteristics() {
@@ -2429,7 +2495,8 @@ public final class BLEManager: NSObject, ObservableObject {
     /// stale after an update/restore. Discovery/connect cancels the pending rotation. (PR#195)
     private func startScan(for model: WhoopModel, allowFallback: Bool) {
         cancelScanFallback()
-        selectedModel = model
+        familyDetectionTargetUUID = nil
+        selectModel(model)
         reassembler = Reassembler(family: model.deviceFamily)
         router.family = model.deviceFamily
         configureCollectorFamily()
@@ -2681,15 +2748,20 @@ public final class BLEManager: NSObject, ObservableObject {
             let plausibility = (30...220).contains(m.hr) ? "" : " ignored"
             log("HR notify: \(m.hr) bpm\(plausibility), rr=\(m.rr.count)")
         }
-        // R-R: the standard profile is the RELIABLE source (the custom REALTIME_DATA stream
-        // usually reports rr_count=0), so always surface intervals when present. setRRIntervals also
-        // feeds the Live console's rolling rrRecent buffer.
-        if !m.rr.isEmpty { state.setRRIntervals(m.rr) }
-        // HR: the standard 0x2A37 profile is the RELIABLE source (BLE-standard, ~1Hz). Let it
-        // drive the value whenever it's physiologically plausible; reject 0/garbage (off-wrist).
-        // AppModel medians these into a stable display value. live perf: only publish on a real
-        // change so a steady resting HR doesn't re-render the whole Live console every second.
-        if m.hr >= 30 && m.hr <= 220, state.heartRate != m.hr { state.heartRate = m.hr }
+        // Publish a packet's valid HR before its R-R intervals so AppModel's R-R sink observes the
+        // matching value for that second. Invalid HR leaves the prior value intact; R-R still flows.
+        for event in StandardHRPublicationPlan.events(
+            packetHR: m.hr,
+            rrIntervals: m.rr,
+            currentHR: state.heartRate
+        ) {
+            switch event {
+            case .heartRate(let heartRate):
+                state.heartRate = heartRate
+            case .rrIntervals(let rrIntervals):
+                state.setRRIntervals(rrIntervals)
+            }
+        }
         // Record it continuously — independent of the realtime stream or the open screen.
         collector?.ingestStandardHR(hr: m.hr, rr: m.rr, at: Int(Date().timeIntervalSince1970))
     }
@@ -2818,6 +2890,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager,
                                didDisconnectPeripheral peripheral: CBPeripheral,
                                error: Error?) {
+        familyDetectionTargetUUID = nil
         Task { @MainActor in await collector?.flush() }
         // #80 marginal-radio detection: judge this drop BEFORE the state resets below clobber the
         // arm timestamp. A drop that is unintentional, error-bearing, and lands shortly after we armed
@@ -2866,7 +2939,6 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             }
         }
         bondedAt = nil   // cleared after the bond-loop detector above read it (#617)
-        state.connected = false
         state.encryptedBond = false   // cleared with didBond; next session must re-prove the bond (#69)
         state.charging = nil          // a stale charging flag must not outlive the link
         state.strapFirmware = nil     // a stale firmware version must not outlive the link
@@ -2916,48 +2988,58 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         resetCharacteristics()
         puffinRecorder.flush()   // persist any buffered puffin capture frames before reconnect
         Task { @MainActor in await collector?.flushStandardHR() }   // persist any buffered 0x2A37 HR
-        if autoReconnectPausedForBondLoop {
-            // #747: the bond keeps being refused, so auto-reconnect is paused: we stop hammering a strap that
-            // can't bond (the epitaph + paused hint were already surfaced when the give-up tripped). The user
-            // re-arms it by tapping Connect. We do NOT schedule a rescan here.
-            log("Disconnected\(error.map { ": \($0.localizedDescription)" } ?? ""); auto-reconnect paused (strap keeps refusing to pair; tap Connect once it's free)")
-            if TestCentre.active(.connection) {
-                state.append(log: "connect down (uptime ends)", domain: .connection)
-                state.append(log: "reconnect paused=bondLoop (strap refusing bond)", domain: .connection)
+        DisconnectCallbackFinalization.run(
+            diagnostics: {
+                if autoReconnectPausedForBondLoop {
+                    // #747: the bond keeps being refused, so auto-reconnect is paused: we stop hammering a strap that
+                    // can't bond (the epitaph + paused hint were already surfaced when the give-up tripped). The user
+                    // re-arms it by tapping Connect. We do NOT schedule a rescan here.
+                    log("Disconnected\(error.map { ": \($0.localizedDescription)" } ?? ""); auto-reconnect paused (strap keeps refusing to pair; tap Connect once it's free)")
+                    if TestCentre.active(.connection) {
+                        state.append(log: "connect down (uptime ends)", domain: .connection)
+                        state.append(log: "reconnect paused=bondLoop (strap refusing bond)", domain: .connection)
+                    }
+                } else if !intentionalDisconnect {
+                    log("Disconnected\(error.map { " — \($0.localizedDescription)" } ?? ""); rescanning in 3s")
+                    // Connection test mode: count + describe the involuntary reconnect churn, and mark the link
+                    // down for the uptime readout. Gated zero-cost (the .connection bool is read before any string
+                    // is built). Diagnostic only - the rescan above is unchanged. The count increments only on an
+                    // INVOLUNTARY drop, mirroring an actual reconnect cycle.
+                    connReconnectCount += 1
+                    if TestCentre.active(.connection) {
+                        let reason = (error as? CBError)?.code == .connectionTimeout
+                            ? "connectionTimeout" : connErrorToken(error)
+                        state.append(log: "connect down (uptime ends)", domain: .connection)
+                        state.append(log: "reconnect n=\(connReconnectCount) reason=\(reason)", domain: .connection)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                        // #78 hole-3: a timer in flight when the give-up trips must not fire an extra attempt
+                        // (and, via connectFromSystem, can never reset the pause the way the old connect() did).
+                        guard let self, !self.intentionalDisconnect, !self.autoReconnectPausedForBondLoop else { return }
+                        self.connectFromSystem()
+                    }
+                } else {
+                    log("Disconnected (intentional)")
+                    // A user-initiated teardown ends the churn count for the run and marks the link down so the
+                    // uptime readout reads "not connected" rather than a stale uptime. Gated zero-cost.
+                    connReconnectCount = 0
+                    if TestCentre.active(.connection) {
+                        state.append(log: "connect down (intentional)", domain: .connection)
+                    }
+                }
+            },
+            disconnectEdge: {
+                // AppModel observes this edge synchronously and flushes workout, stress, and the log
+                // tail once. Keeping it last includes every diagnostic emitted above in that flush.
+                state.connected = false
             }
-        } else if !intentionalDisconnect {
-            log("Disconnected\(error.map { " — \($0.localizedDescription)" } ?? ""); rescanning in 3s")
-            // Connection test mode: count + describe the involuntary reconnect churn, and mark the link
-            // down for the uptime readout. Gated zero-cost (the .connection bool is read before any string
-            // is built). Diagnostic only - the rescan above is unchanged. The count increments only on an
-            // INVOLUNTARY drop, mirroring an actual reconnect cycle.
-            connReconnectCount += 1
-            if TestCentre.active(.connection) {
-                let reason = (error as? CBError)?.code == .connectionTimeout
-                    ? "connectionTimeout" : connErrorToken(error)
-                state.append(log: "connect down (uptime ends)", domain: .connection)
-                state.append(log: "reconnect n=\(connReconnectCount) reason=\(reason)", domain: .connection)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                // #78 hole-3: a timer in flight when the give-up trips must not fire an extra attempt
-                // (and, via connectFromSystem, can never reset the pause the way the old connect() did).
-                guard let self, !self.intentionalDisconnect, !self.autoReconnectPausedForBondLoop else { return }
-                self.connectFromSystem()
-            }
-        } else {
-            log("Disconnected (intentional)")
-            // A user-initiated teardown ends the churn count for the run and marks the link down so the
-            // uptime readout reads "not connected" rather than a stale uptime. Gated zero-cost.
-            connReconnectCount = 0
-            if TestCentre.active(.connection) {
-                state.append(log: "connect down (intentional)", domain: .connection)
-            }
-        }
+        )
     }
 
     public func centralManager(_ central: CBCentralManager,
                                didFailToConnect peripheral: CBPeripheral,
                                error: Error?) {
+        familyDetectionTargetUUID = nil
         log("Failed to connect\(error.map { " — \($0.localizedDescription)" } ?? "")")
         // The strap wiped its bond (a firmware update, or the official WHOOP app re-bonding it). macOS keeps
         // re-presenting the now-stale pairing key, so every reconnect loops on this same error with no
@@ -3015,6 +3097,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         self.peripheral = p
         self.restoredPeripheral = p
+        familyDetectionTargetUUID = nil
         p.delegate = self
         resetCharacteristics()
         // Re-derive the inbound-decode family from the persisted model. connect()/startScan() set the
@@ -3022,7 +3105,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // WHOOP 5/MG would decode its puffin notify frames with the default .whoop4 framing (different
         // length offset + constant), producing corrupt/empty data for the whole unattended session until
         // the user manually taps connect.
-        selectedModel = .persisted
+        selectModel(.persisted)
         reassembler = Reassembler(family: selectedModel.deviceFamily)
         router.family = selectedModel.deviceFamily
         configureCollectorFamily()
@@ -3057,12 +3140,29 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        let wasDetectingFamily = familyDetectionTargetUUID == peripheral.identifier
+        defer {
+            if wasDetectingFamily {
+                familyDetectionTargetUUID = nil
+            }
+        }
         if let error {
             log("Service discovery failed: \(error.localizedDescription)")
             return
         }
         guard let services = peripheral.services else { return }
         log("Services discovered: \(services.map { $0.uuid.uuidString }.joined(separator: ", "))")
+        if wasDetectingFamily {
+            if let detectedModel = WhoopPrimaryServiceDiscoveryPlan.detectedModel(
+                from: services.map(\.uuid)
+            ) {
+                configureDetectedFamily(detectedModel)
+                UserDefaults.standard.set(detectedModel.rawValue, forKey: "selectedWhoopModel")
+                log("Targeted reconnect detected \(detectedModel.displayName) from its primary service")
+            } else {
+                log("Targeted reconnect did not expose exactly one supported WHOOP primary service")
+            }
+        }
         for s in services {
             switch s.uuid {
             case BLEManager.customService:

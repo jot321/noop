@@ -35,3 +35,38 @@ final class StandardHRNoteTests: XCTestCase {
         XCTAssertTrue(LiveView.shouldShowStandardHRNote("  live HR via standard profile  "))
     }
 }
+
+final class StandardHRPublicationPlanTests: XCTestCase {
+    func testValidPacketPublishesHeartRateBeforeRRIntervals() {
+        XCTAssertEqual(
+            StandardHRPublicationPlan.events(
+                packetHR: 88,
+                rrIntervals: [680, 690],
+                currentHR: 72
+            ),
+            [.heartRate(88), .rrIntervals([680, 690])]
+        )
+    }
+
+    func testInvalidPacketHeartRateDoesNotReplacePriorValue() {
+        XCTAssertEqual(
+            StandardHRPublicationPlan.events(
+                packetHR: 0,
+                rrIntervals: [800],
+                currentHR: 72
+            ),
+            [.rrIntervals([800])]
+        )
+    }
+
+    func testUnchangedHeartRateAndMissingRRPublishNothing() {
+        XCTAssertEqual(
+            StandardHRPublicationPlan.events(
+                packetHR: 72,
+                rrIntervals: [],
+                currentHR: 72
+            ),
+            []
+        )
+    }
+}

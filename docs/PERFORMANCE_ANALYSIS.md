@@ -35,8 +35,10 @@ Status: implemented.
 
 The Live screen now builds an equatable `LiveScreenSnapshot` from low-frequency
 root inputs and keeps HR, R-R, frame, log, and workout sample changes in leaf
-views. `LiveScreenSnapshotTests` verify that high-frequency fields are excluded
-and that root-visible state changes are still represented.
+views. The production host applies `.equatable()` to `LiveScreenContent`, so
+SwiftUI consults that snapshot equality. `LiveScreenSnapshotTests` verify the
+host boundary, that high-frequency fields are excluded, and that root-visible
+state changes are still represented.
 
 Commits: `aa05711` and `38fbe5b`.
 
@@ -62,7 +64,12 @@ running count/sum/peak in `ActiveWorkoutRuntime`, gates live strain work to a
 checked coordinator. The coordinator writes start immediately, coalesces normal
 snapshots to a 15-second production interval, flushes on lifecycle boundaries,
 and clears after invalidating delayed work so an ended workout cannot be
-resurrected.
+resurrected. The initial encode/store runs synchronously on that serial utility
+queue, so `start` does not return before the snapshot is loadable.
+
+The `.workout` realtime owner follows the workout lifecycle: successful start
+and restoration acquire it, while end and discard release it exactly once
+before persistence teardown. Sheet dismissal affects only screen-idle behavior.
 
 Tests: `ActiveWorkoutRuntimeTests` and `ActiveWorkoutPersistenceTests`.
 
@@ -89,7 +96,9 @@ Status: implemented.
 HR and R-R ingestion are split so stress evaluation consumes only the supplied
 R-R packet once. Replay-safety transitions (`wasBelow`, `lastFireAt`) persist
 immediately, baseline-only EMA updates coalesce to a 60-second production
-interval, and disabled/unchanged state writes nothing.
+interval, and disabled/unchanged state writes nothing. Disabling the real
+master/auto-nudge preference invalidates delayed baseline work even if no later
+R-R packet arrives; re-enabling permits fresh state to schedule normally.
 
 Tests: `StressStatePersistenceTests`.
 
@@ -102,9 +111,13 @@ Status: implemented.
 The persisted `CBPeripheral.identifier` was already stored. The fix narrows the
 late-pin path: when a valid saved UUID arrives while an ordinary automatic scan
 is active, the scanner cancels the fallback rotation, retrieves the preferred
-peripheral, and redirects to the targeted connect path. Presentation scans,
-restoration, connected links, bond-loop pauses, stale pins, and no-pin first
-pairing are left alone.
+peripheral, and redirects to the targeted connect path. The targeted redirect
+discovers both WHOOP primary families and uses the actual service set to select
+and persist WHOOP4 versus WHOOP5/MG before characteristic discovery. This keeps
+framing, routing, collector family, and rated-hours configuration consistent
+even after scan fallback rotated models. Presentation scans, restoration,
+connected links, bond-loop pauses, stale pins, and no-pin first pairing are left
+alone.
 
 Tests: `PreferredPeripheralRedirectTests`.
 
@@ -118,7 +131,9 @@ Realtime demand is now derived from explicit owners. Backgrounding suppresses
 only the foreground Live-screen owner; active workout, live session, and manual
 control owners continue to hold their intended demand. This prevents a Live
 screen-only WHOOP4 R10/R11 burst from surviving backgrounding while preserving
-workout/session capture.
+workout/session capture. `AppModel` applies the same effective-owner rule to
+Live Activity cadence, so a retained background Live-screen owner no longer
+keeps two-second updates active.
 
 Tests: `RealtimeDemandPolicyTests`.
 
@@ -145,12 +160,25 @@ valid connected HR sample, update at a two-second minimum only during an active
 Live/workout/session experience, update at a 30-second minimum during passive
 wear, and end immediately on disconnect or Live Activity opt-out. Follow-up
 fixes prevent end race re-adoption and preserve newer push state when old
-ActivityKit handles finish ending.
+ActivityKit handles finish ending. Terminal reconciliation unions the cached
+handle with ActivityKit enumeration and performs a bounded,
+duplicate-suppressed hydration retry when both are initially empty; a later
+valid state cancels pending retry work.
 
 Tests: `LiveActivityUpdatePolicyTests` and the focused iOS 17 ActivityKit
 typecheck recorded in the implementation document.
 
 Commits: `700bcbb`, `1fc2c47`, and `0444aa5`.
+
+## Final Review Corrections
+
+The consolidated whole-branch review also corrected two ordering details. A
+standard-HR packet now publishes valid HR before R-R so the R-R subscriber
+cannot capture the previous second's HR; invalid HR still leaves the prior
+value untouched. The BLE disconnect callback now emits its connected-state
+edge only after final diagnostics and reconnect scheduling, so the existing
+observer's one performance-state flush includes the complete log tail without
+duplicating workout or stress flushes.
 
 ## Deferred Findings
 

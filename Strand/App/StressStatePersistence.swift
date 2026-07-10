@@ -38,6 +38,7 @@ final class StressStatePersistence {
     private var dirty = false
     private var trailingID: UInt64 = 0
     private var scheduledTrailingID: UInt64?
+    private var persistenceEnabled = true
 
     init(
         defaults: UserDefaults = .standard,
@@ -52,13 +53,24 @@ final class StressStatePersistence {
         queue.setSpecific(key: specificKey, value: ())
     }
 
+    static func isEnabled(checkIn: Bool, autoNudge: Bool) -> Bool {
+        checkIn && autoNudge
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        syncOnQueue {
+            guard self.persistenceEnabled != enabled else { return }
+            self.persistenceEnabled = enabled
+            guard !enabled else { return }
+            self.latest = nil
+            self.dirty = false
+            self.invalidateTrailing()
+        }
+    }
+
     func persist(previous: StressOnsetDetector.State, next: StressOnsetDetector.State, enabled: Bool) {
         guard enabled else {
-            queue.async { [self] in
-                latest = nil
-                dirty = false
-                invalidateTrailing()
-            }
+            setEnabled(false)
             return
         }
         guard previous != next else { return }
@@ -66,6 +78,7 @@ final class StressStatePersistence {
         let safetyEdge = previous.wasBelow != next.wasBelow || previous.lastFireAt != next.lastFireAt
         if safetyEdge {
             syncOnQueue {
+                self.persistenceEnabled = true
                 self.latest = next
                 self.dirty = false
                 self.invalidateTrailing()
@@ -73,6 +86,7 @@ final class StressStatePersistence {
             }
         } else {
             queue.async { [self] in
+                persistenceEnabled = true
                 latest = next
                 dirty = true
                 scheduleTrailingIfNeeded()
@@ -106,12 +120,18 @@ final class StressStatePersistence {
     }
 
     private func runTrailing(id: UInt64) {
-        guard scheduledTrailingID == id else { return }
+        guard persistenceEnabled, scheduledTrailingID == id else { return }
         scheduledTrailingID = nil
         persistIfDirty()
     }
 
     private func persistIfDirty() {
+        guard persistenceEnabled else {
+            latest = nil
+            dirty = false
+            invalidateTrailing()
+            return
+        }
         guard dirty, let latest else {
             invalidateTrailing()
             return

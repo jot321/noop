@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import Strand
 
 @MainActor
@@ -27,6 +28,13 @@ final class LiveScreenSnapshotTests: XCTestCase {
         let labels = Set(Mirror(reflecting: makeSnapshot()).children.compactMap(\.label))
 
         XCTAssertTrue(labels.isDisjoint(with: ["heartRate", "rr", "rrRecent", "lastFrameType", "lastEvent", "log", "visibleLog", "bpm"]))
+    }
+
+    func testProductionHostInstallsEquatableContentBoundary() {
+        XCTAssertEqual(
+            ObjectIdentifier(LiveView.Body.self),
+            ObjectIdentifier(EquatableView<LiveScreenContent>.self)
+        )
     }
 
     private func makeSnapshot(

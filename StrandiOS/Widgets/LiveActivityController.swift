@@ -22,6 +22,7 @@ final class LiveActivityController {
     /// frozen activity if the app is suspended/killed without an explicit end (a missed-tick safety net
     /// on top of the connected-driven end below).
     private static let staleAfter: TimeInterval = 120
+    private static let terminalHydrationRetryDelayNanoseconds: UInt64 = 250_000_000
 
     /// Drive the activity from the latest live values. Starts immediately on a valid connected HR
     /// sample, updates at the shared active/passive cadence, and ends immediately on opt-out or
@@ -104,20 +105,21 @@ final class LiveActivityController {
     }
 
     private func scheduleEnd() {
-        // Snapshot current candidates before scheduling work. Reconciliation excludes targets already
-        // assigned to another pending, active, or completed plan.
-        let candidates = Activity<NOOPActivityAttributes>.activities
+        // Union the cached handle with ActivityKit's eventually consistent enumeration before clearing
+        // controller state. Reconciliation excludes already pending, active, or completed targets.
+        let candidates = LiveActivityEndCandidateSet.deduplicated(
+            cached: activity,
+            listed: Activity<NOOPActivityAttributes>.activities,
+            id: \.id
+        )
         activity = nil
-        let plan = reconciliation.planEnd(targetIDs: candidates.map(\.id))
-        let targetIDs = Set(plan.targetIDs)
-        let targets = candidates.filter { targetIDs.contains($0.id) }
-
-        guard !targets.isEmpty else {
-            if reconciliation.beginEnd(plan) {
-                reconciliation.completeEnd(plan)
-            }
+        guard let plan = reconciliation.planEnd(targetIDs: candidates.map(\.id)) else {
+            scheduleTerminalHydrationRetry()
             return
         }
+        reconciliation.markTerminalTargetsFound()
+        let targetIDs = Set(plan.targetIDs)
+        let targets = candidates.filter { targetIDs.contains($0.id) }
 
         Task {
             guard reconciliation.beginEnd(plan) else { return }
@@ -127,6 +129,15 @@ final class LiveActivityController {
             // Completion only retires this token. Handle and push state were detached before the task,
             // so actor re-entry during an await cannot clear a newer activity or cadence timestamp.
             reconciliation.completeEnd(plan)
+        }
+    }
+
+    private func scheduleTerminalHydrationRetry() {
+        guard let plan = reconciliation.planTerminalHydrationRetry() else { return }
+        Task {
+            try? await Task.sleep(nanoseconds: Self.terminalHydrationRetryDelayNanoseconds)
+            guard reconciliation.beginTerminalHydrationRetry(plan) else { return }
+            scheduleEnd()
         }
     }
 }

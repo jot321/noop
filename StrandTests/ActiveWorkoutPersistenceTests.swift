@@ -169,6 +169,29 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         }
     }
 
+    func testCoordinatorStartReturnsOnlyAfterInitialSnapshotIsDurable() {
+        let defaults = freshDefaults()
+        let events = LockedEvents()
+        let queue = testQueue()
+        let unblockQueue = DispatchSemaphore(value: 0)
+        queue.async { unblockQueue.wait() }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) {
+            unblockQueue.signal()
+        }
+        let coordinator = ActiveWorkoutPersistenceCoordinator(
+            defaults: defaults,
+            snapshotInterval: 0.05,
+            queue: queue,
+            writeObserver: { events.append($0) })
+        let initial = snapshot()
+
+        coordinator.start(initial)
+
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults), initial)
+        XCTAssertEqual(events.snapshot, [.store(initial, isMainThread: false)])
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+    }
+
     func testCoordinatorCoalescesRepeatedUpdatesToOneTrailingWrite() {
         let defaults = freshDefaults()
         let events = LockedEvents()

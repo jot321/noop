@@ -51,6 +51,13 @@ final class StressStatePersistenceTests: XCTestCase {
         XCTAssertEqual(StressStatePersistence.productionBaselineInterval, 60)
     }
 
+    func testPreferenceEnablementRequiresMasterAndAutoNudge() {
+        XCTAssertFalse(StressStatePersistence.isEnabled(checkIn: false, autoNudge: false))
+        XCTAssertFalse(StressStatePersistence.isEnabled(checkIn: false, autoNudge: true))
+        XCTAssertFalse(StressStatePersistence.isEnabled(checkIn: true, autoNudge: false))
+        XCTAssertTrue(StressStatePersistence.isEnabled(checkIn: true, autoNudge: true))
+    }
+
     func testWasBelowTransitionPersistsImmediately() {
         let defaults = freshDefaults()
         let (coordinator, events) = coordinator(defaults: defaults)
@@ -119,6 +126,37 @@ final class StressStatePersistenceTests: XCTestCase {
 
         XCTAssertEqual(BiofeedbackPrefs.loadStressState(from: defaults), next)
         XCTAssertEqual(events.snapshot, [.store(next, isMainThread: false)])
+    }
+
+    func testDisableBeforeDeadlineInvalidatesScheduledBaselineWrite() {
+        let defaults = freshDefaults()
+        let (coordinator, events) = coordinator(defaults: defaults, interval: 0.05)
+        let previous = StressOnsetDetector.State(baselineRMSSD: 80, wasBelow: false, lastFireAt: 0)
+        let next = StressOnsetDetector.State(baselineRMSSD: 83, wasBelow: false, lastFireAt: 0)
+
+        coordinator.persist(previous: previous, next: next, enabled: true)
+        coordinator.setEnabled(false)
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+
+        XCTAssertTrue(events.snapshot.isEmpty)
+        XCTAssertEqual(BiofeedbackPrefs.loadStressState(from: defaults), .initial)
+    }
+
+    func testReenableAllowsNewBaselineStateToSchedule() {
+        let defaults = freshDefaults()
+        let (coordinator, events) = coordinator(defaults: defaults, interval: 0.05)
+        let previous = StressOnsetDetector.State(baselineRMSSD: 80, wasBelow: false, lastFireAt: 0)
+        let canceled = StressOnsetDetector.State(baselineRMSSD: 81, wasBelow: false, lastFireAt: 0)
+        let reenabled = StressOnsetDetector.State(baselineRMSSD: 84, wasBelow: false, lastFireAt: 0)
+
+        coordinator.persist(previous: previous, next: canceled, enabled: true)
+        coordinator.setEnabled(false)
+        coordinator.setEnabled(true)
+        coordinator.persist(previous: canceled, next: reenabled, enabled: true)
+
+        XCTAssertTrue(waitUntil(timeout: 1) { events.snapshot.count == 1 })
+        XCTAssertEqual(BiofeedbackPrefs.loadStressState(from: defaults), reenabled)
     }
 
     func testUnchangedAndDisabledStateWriteNothing() {

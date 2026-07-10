@@ -135,6 +135,7 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     private var activeWorkoutIsGps = false
     private var activeWorkoutRuntime = ActiveWorkoutRuntime()
     private let activeWorkoutPersistence = ActiveWorkoutPersistenceCoordinator()
+    private var activeWorkoutRealtimeOwnership = ActiveWorkoutRealtimeOwnership()
 
     /// A manual workout in progress. `samples` accumulate from the smoothed live `bpm`; `liveStrain`
     /// is recomputed as the window grows so the active card can show strain building in real time.
@@ -281,6 +282,14 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
             guard let self, !connected else { return }
             self.flushPerformanceState()
         }.store(in: &hrCancellables)
+        Publishers.CombineLatest(behavior.$stressCheckIn, behavior.$stressAutoNudge)
+            .map { StressStatePersistence.isEnabled(checkIn: $0, autoNudge: $1) }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] enabled in
+                self?.stressStatePersistence.setEnabled(enabled)
+            }
+            .store(in: &hrCancellables)
         installPerformanceFlushObservers()
 
         // Physical-input + wear hooks (fired live by FrameRouter).
@@ -593,6 +602,7 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         let started = Date()
         activeWorkout = ActiveWorkout(start: started, sport: resolved)
         activeWorkoutRuntime = ActiveWorkoutRuntime()
+        applyWorkoutRealtimeMutation(activeWorkoutRealtimeOwnership.workoutDidBegin())
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -716,6 +726,7 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         w.liveStrain = snap.liveStrain
         activeWorkout = w
         activeWorkoutRuntime = ActiveWorkoutRuntime(restoredSamples: snap.samples)
+        applyWorkoutRealtimeMutation(activeWorkoutRealtimeOwnership.workoutDidBegin())
         activeWorkoutPersistence.start(activeWorkoutSnapshot(w))
     }
 
@@ -724,6 +735,7 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// with Android) , but a GPS-only walk with HR not streaming still saves. Double-buzz confirms.
     func endWorkout() {
         guard let w = activeWorkout else { return }
+        applyWorkoutRealtimeMutation(activeWorkoutRealtimeOwnership.workoutWillEnd())
         activeWorkout = nil
         activeWorkoutRuntime = ActiveWorkoutRuntime()
         let wasGps = activeWorkoutIsGps
@@ -870,7 +882,10 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         stressStatePersistence.persist(
             previous: previousState,
             next: decision.nextState,
-            enabled: cfg.enabled && cfg.autoNudge)
+            enabled: StressStatePersistence.isEnabled(
+                checkIn: cfg.enabled,
+                autoNudge: cfg.autoNudge
+            ))
         guard decision.shouldNudge else { return }
         if canBuzz { buzz(loops: UInt8(clamping: decision.buzzLoops)) }
         stressNudgeCenter.present(fastRMSSD: decision.fastRMSSD, baselineRMSSD: decision.baselineRMSSD)
@@ -1014,9 +1029,26 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// Explicit owners currently asking for realtime HR/R-R. A set makes duplicate appear/disappear
     /// events idempotent: reconnect can re-arm without acquiring, and one owner cannot leak a count.
     @Published private var realtimeOwnerCoordinator = RealtimeOwnerCoordinator()
+    @Published private var appForeground = true
 
-    var hasActiveRealtimeExperience: Bool { realtimeOwnerCoordinator.ownersForRearm != nil }
+    var hasActiveRealtimeExperience: Bool {
+        !RealtimeDemandPolicy.effectiveExplicitOwners(
+            realtimeOwnerCoordinator.owners,
+            appForeground: appForeground
+        ).isEmpty
+    }
     var hasManualRealtimeControl: Bool { realtimeOwnerCoordinator.owners.contains(.manualControl) }
+
+    private func applyWorkoutRealtimeMutation(_ mutation: RealtimeOwnerMutation?) {
+        switch mutation {
+        case let .acquire(owner):
+            acquireRealtime(owner)
+        case let .release(owner):
+            releaseRealtime(owner)
+        case nil:
+            break
+        }
+    }
 
     /// A realtime owner appeared. Arms on first active owner and only then blanks stale smoothing (#46),
     /// so a second concurrent owner cannot clear an already-live window.
@@ -1043,6 +1075,9 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     }
 
     func setAppForeground(_ foreground: Bool) {
+        if appForeground != foreground {
+            appForeground = foreground
+        }
         ble.setAppForeground(foreground)
     }
     /// Ask the strap for a fresh battery reading.

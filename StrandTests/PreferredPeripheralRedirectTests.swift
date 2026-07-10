@@ -9,8 +9,7 @@ final class PreferredPeripheralRedirectTests: XCTestCase {
     private let newPin = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
     func testNewValidUUIDRedirectsOrdinaryAutomaticScanWhenTargetIsRetrievable() {
-        XCTAssertEqual(
-            BLEManager.preferredPeripheralRedirectPlan(
+        let plan = BLEManager.preferredPeripheralRedirectPlan(
                 previousPin: oldPin,
                 incomingPin: newPin.uuidString,
                 isPresentingScan: false,
@@ -18,9 +17,10 @@ final class PreferredPeripheralRedirectTests: XCTestCase {
                 isConnected: false,
                 isScanning: true,
                 autoReconnectPausedForBondLoop: false,
-                retrievedTargetAvailable: true),
-            .redirectToRetrievedPeripheral(newPin)
-        )
+                retrievedTargetAvailable: true)
+
+        XCTAssertEqual(plan, .redirectToRetrievedPeripheral(newPin))
+        XCTAssertTrue(plan.requiresFamilyDetection)
     }
 
     func testSameNilAndInvalidUUIDDoNotRedirect() {
@@ -124,6 +124,58 @@ final class PreferredPeripheralRedirectTests: XCTestCase {
                 autoReconnectPausedForBondLoop: false,
                 retrievedTargetAvailable: false),
             .keepScanningForPreferred(newPin)
+        )
+    }
+
+    func testLateRedirectDiscoversBothPrimaryFamiliesBeforeAndAfterFallbackRotation() {
+        for selectedModel in [WhoopModel.whoop4, .whoop5mg] {
+            XCTAssertEqual(
+                WhoopPrimaryServiceDiscoveryPlan.make(
+                    selectedModel: selectedModel,
+                    detectsFamily: true
+                ).primaryModels,
+                [.whoop4, .whoop5mg]
+            )
+        }
+    }
+
+    func testNormalConnectionDiscoversOnlySelectedPrimaryFamily() {
+        XCTAssertEqual(
+            WhoopPrimaryServiceDiscoveryPlan.make(
+                selectedModel: .whoop4,
+                detectsFamily: false
+            ).primaryModels,
+            [.whoop4]
+        )
+        XCTAssertEqual(
+            WhoopPrimaryServiceDiscoveryPlan.make(
+                selectedModel: .whoop5mg,
+                detectsFamily: false
+            ).primaryModels,
+            [.whoop5mg]
+        )
+    }
+
+    func testDetectedFamilyComesFromActualPrimaryService() {
+        XCTAssertEqual(
+            WhoopPrimaryServiceDiscoveryPlan.detectedModel(
+                from: [WhoopModel.whoop4.scanService]
+            ),
+            .whoop4
+        )
+        XCTAssertEqual(
+            WhoopPrimaryServiceDiscoveryPlan.detectedModel(
+                from: [WhoopModel.whoop5mg.scanService]
+            ),
+            .whoop5mg
+        )
+    }
+
+    func testNoPrimaryServiceDoesNotGuessFamily() {
+        XCTAssertNil(
+            WhoopPrimaryServiceDiscoveryPlan.detectedModel(
+                from: [BLEManager.heartRateService, BLEManager.batteryService]
+            )
         )
     }
 }

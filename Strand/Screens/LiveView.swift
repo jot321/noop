@@ -97,6 +97,7 @@ struct LiveView: View {
             router: router,
             snapshot: LiveScreenSnapshot(model: model, live: live)
         )
+        .equatable()
     }
 
     static func shouldShowStandardHRNote(_ note: String?) -> Bool {
@@ -116,7 +117,7 @@ struct LiveView: View {
 /// `LiveLogCard`, …) — the Today pattern — so a fresh HR / R-R / frame notify re-renders just that leaf,
 /// never the whole screen. The parent only observes the coarse connection transitions it needs to re-arm
 /// the stream and gate the layout.
-private struct LiveScreenContent: View, Equatable {
+struct LiveScreenContent: View, Equatable {
     let model: AppModel
     let live: LiveState
     /// Cross-screen navigation — drives the "Manage devices" affordance to the first-class Devices

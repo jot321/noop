@@ -69,20 +69,13 @@ struct LiveWorkoutView: View {
         }
         // If the workout ended elsewhere (process restart cleared it), close the screen.
         .onChangeCompat(of: model.activeWorkout == nil) { gone in if gone { onClose() } }
-        // Arm the realtime HR stream while the in-exercise screen is up (#681). On a WHOOP 5/MG live HR
-        // only flows while the puffin realtime stream is armed; previously only the Live tab armed it, so
-        // starting a manual workout straight from Workouts (Live never opened) left `model.bpm == nil` —
-        // captureWorkoutSample bailed on every sample and endWorkout silently discarded the empty
-        // session. Ref-counted in AppModel, so when this sheet sits over an already-armed Live tab the
-        // two balance and neither disarms the other. Balanced: one owner acquire on appear, one release
-        // on disappear.
+        // Realtime ownership follows the workout lifetime in AppModel. This view owns only the bounded
+        // screen-idle behavior, so dismissing the sheet cannot stop an in-progress workout's stream.
         .onAppear {
-            model.acquireRealtime(.workout)
             // Hold the display awake for the session only if the user opted in (#703).
             if keepScreenOn { ScreenIdle.keepAwake(true) }
         }
         .onDisappear {
-            model.releaseRealtime(.workout)
             // Always release on the way out so the system idle timer resumes. Even if the toggle was
             // flipped off mid-workout, this clears any hold we placed.
             ScreenIdle.keepAwake(false)

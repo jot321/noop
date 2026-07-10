@@ -43,9 +43,32 @@ struct RealtimeOwnerCoordinator {
     }
 }
 
+enum RealtimeOwnerMutation: Equatable {
+    case acquire(RealtimeDemandOwner)
+    case release(RealtimeDemandOwner)
+}
+
+/// Couples the workout realtime owner to the workout's lifetime rather than to any one presentation.
+/// AppModel applies the returned mutation through its existing idempotent owner coordinator.
+struct ActiveWorkoutRealtimeOwnership {
+    private(set) var ownsRealtime = false
+
+    mutating func workoutDidBegin() -> RealtimeOwnerMutation? {
+        guard !ownsRealtime else { return nil }
+        ownsRealtime = true
+        return .acquire(.workout)
+    }
+
+    mutating func workoutWillEnd() -> RealtimeOwnerMutation? {
+        guard ownsRealtime else { return nil }
+        ownsRealtime = false
+        return .release(.workout)
+    }
+}
+
 struct RealtimeCommandSentState {
     private(set) var toggleArmed = false
-    private(set) var heavyWhoop4Armed = false
+    private(set) var heavyWhoop4Armed: Bool?
     private(set) var heavyWhoop4ArmedAt: Date?
 
     func shouldSendToggle(wanted: Bool, forceWanted: Bool = false) -> Bool {
@@ -53,7 +76,8 @@ struct RealtimeCommandSentState {
     }
 
     func shouldSendHeavy(wanted: Bool, forceWanted: Bool = false) -> Bool {
-        wanted != heavyWhoop4Armed || (forceWanted && wanted)
+        guard let heavyWhoop4Armed else { return true }
+        return wanted != heavyWhoop4Armed || (forceWanted && wanted)
     }
 
     mutating func recordToggle(wanted: Bool, queued: Bool) {
@@ -68,14 +92,17 @@ struct RealtimeCommandSentState {
     }
 
     mutating func clearHeavyForOtherFamily() {
-        heavyWhoop4Armed = false
+        resetHeavyForFamilyTransition()
+    }
+
+    mutating func resetHeavyForFamilyTransition() {
+        heavyWhoop4Armed = nil
         heavyWhoop4ArmedAt = nil
     }
 
     mutating func resetForDisconnect() {
         toggleArmed = false
-        heavyWhoop4Armed = false
-        heavyWhoop4ArmedAt = nil
+        resetHeavyForFamilyTransition()
     }
 }
 
@@ -130,16 +157,21 @@ struct RealtimeDemandOutput: Equatable {
 }
 
 struct RealtimeDemandPolicy {
+    static func effectiveExplicitOwners(
+        _ owners: Set<RealtimeDemandOwner>,
+        appForeground: Bool
+    ) -> Set<RealtimeDemandOwner> {
+        guard !appForeground else { return owners }
+        return owners.subtracting([.liveScreen])
+    }
+
     static func evaluate(deviceFamily: DeviceFamily,
                          owners: Set<RealtimeDemandOwner>,
                          appForeground: Bool,
                          passiveCaptureWanted: Bool,
                          marginalRadioFallback: Bool)
         -> RealtimeDemandOutput {
-        var activeOwners = owners
-        if !appForeground {
-            activeOwners.remove(.liveScreen)
-        }
+        let activeOwners = effectiveExplicitOwners(owners, appForeground: appForeground)
 
         let explicitDemand = !activeOwners.isEmpty
         let toggleWanted = explicitDemand || passiveCaptureWanted

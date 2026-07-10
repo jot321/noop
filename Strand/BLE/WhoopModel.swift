@@ -51,3 +51,22 @@ public enum WhoopModel: String, CaseIterable, Identifiable, Hashable {
         }
     }
 }
+
+struct WhoopPrimaryServiceDiscoveryPlan: Equatable {
+    let primaryModels: [WhoopModel]
+
+    static func make(selectedModel: WhoopModel, detectsFamily: Bool) -> Self {
+        Self(primaryModels: detectsFamily ? [.whoop4, .whoop5mg] : [selectedModel])
+    }
+
+    var primaryServiceUUIDs: [CBUUID] {
+        primaryModels.map(\.scanService)
+    }
+
+    static func detectedModel(from serviceUUIDs: [CBUUID]) -> WhoopModel? {
+        let hasWhoop4 = serviceUUIDs.contains(WhoopModel.whoop4.scanService)
+        let hasWhoop5 = serviceUUIDs.contains(WhoopModel.whoop5mg.scanService)
+        guard hasWhoop4 != hasWhoop5 else { return nil }
+        return hasWhoop4 ? .whoop4 : .whoop5mg
+    }
+}
