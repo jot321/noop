@@ -441,6 +441,38 @@ struct ContinuousHrvSchedule {
 /// Cannot run in the simulator; verified manually on-device (Task C6).
 @MainActor
 public final class BLEManager: NSObject, ObservableObject {
+    enum PreferredPeripheralRedirectPlan: Equatable {
+        case noRedirect
+        case keepScanningForPreferred(UUID)
+        case redirectToRetrievedPeripheral(UUID)
+    }
+
+    /// Pure P1 planner for a late-arriving preferred peripheral pin. Redirection is deliberately narrow:
+    /// only a genuinely new valid pin may interrupt an ordinary automatic scan, and only when the OS can
+    /// retrieve that exact CBPeripheral by identifier. Every other state keeps the existing scan,
+    /// restoration, connected link, present-scan, or bond-loop pause untouched.
+    nonisolated static func preferredPeripheralRedirectPlan(previousPin: UUID?,
+                                                            incomingPin: String?,
+                                                            isPresentingScan: Bool,
+                                                            hasRestoredPeripheral: Bool,
+                                                            isConnected: Bool,
+                                                            isScanning: Bool,
+                                                            autoReconnectPausedForBondLoop: Bool,
+                                                            retrievedTargetAvailable: Bool)
+        -> PreferredPeripheralRedirectPlan {
+        guard let resolved = incomingPin.flatMap(UUID.init(uuidString:)),
+              resolved != previousPin,
+              isScanning,
+              !isPresentingScan,
+              !hasRestoredPeripheral,
+              !isConnected,
+              !autoReconnectPausedForBondLoop else {
+            return .noRedirect
+        }
+        return retrievedTargetAvailable
+            ? .redirectToRetrievedPeripheral(resolved)
+            : .keepScanningForPreferred(resolved)
+    }
 
     // MARK: GATT UUIDs (authoritative, from FINDINGS.md)
     static let customService   = CBUUID(string: "61080001-8d6d-82b8-614a-1c8cb0f8dcc6")
@@ -524,24 +556,27 @@ public final class BLEManager: NSObject, ObservableObject {
     static let scanFallbackDelaySeconds: TimeInterval = 8
     /// Last time ANY notification arrived — drives the liveness watchdog.
     private var lastDataAt = Date()
-    /// True while a Live/Health screen is on-screen and wants the realtime stream. One of the two
-    /// inputs to `wantsRealtime`. Driven by `startRealtime()` / `stopRealtime()`.
-    private var screenWantsRealtime = false
+    /// Explicit app owners that want realtime data. The foreground Live screen is suppressed while the
+    /// app backgrounds; workout/session/manual owners keep demand until they release.
+    private var realtimeDemandOwners = Set<RealtimeDemandOwner>()
+    /// Scene foreground state, injected by AppModel from the platform scene hooks.
+    private var appForeground = true
     /// True while the "Continuous HRV capture" preference wants the realtime stream held open even with
     /// no Live screen visible, so the strap banks dense beat-to-beat R-R 24/7 (better overnight
-    /// HRV/recovery/sleep). The second input to `wantsRealtime`. Default off; set by
+    /// HRV/recovery/sleep). Passive input to realtime demand. Default off; set by
     /// `setKeepRealtimeForData(_:)`. Mirrors the Android `keepStreamForData`. #927: this is the RAW
     /// preference intent; the effective want is window-gated through `continuousCaptureWantsNow()` when
     /// "overnight only" is on, re-derived at every arm site.
     private var keepRealtimeForData = false
-    /// Derived want: the (heavy) realtime stream should be armed while EITHER a screen wants it OR the
-    /// continuous-capture preference wants it. Keep-alive re-arms it; the post-bond branch arms it on
-    /// connect. Recomputed only inside `reconcileRealtime()`.
-    private var wantsRealtime = false
-    /// What we last told the strap (armed = TOGGLE_REALTIME_HR 1). Lets `reconcileRealtime()` send the
-    /// toggle only on the false↔true edge instead of on every input change. Cleared on disconnect — the
-    /// strap forgets the toggle across a connection, and the post-bond branch re-arms from `wantsRealtime`.
-    private var realtimeArmed = false
+    /// Last derived demand, retained so keep-alive can log passive window edges without conflating them
+    /// with explicit owner demand.
+    private var lastRealtimeDemand = RealtimeDemandOutput(toggleWanted: false, heavyWhoop4Wanted: false)
+    /// What we last told the strap for TOGGLE_REALTIME_HR. Cleared on disconnect; owner/passive intent is
+    /// retained separately so reconnect/post-bond can re-arm without acquiring another owner.
+    private var toggleRealtimeArmed = false
+    /// What we last told a WHOOP 4 for the heavy R10/R11 burst. This is separate from the toggle because
+    /// passive continuous-HRV capture may need the toggle while never needing R10/R11.
+    private var heavyWhoop4RealtimeArmed = false
     /// #80 marginal-radio fallback: tracks consecutive arm-then-quick-timeout cycles. When it trips,
     /// `standardHRFallback` goes true and the next connect skips arming R10/R11 (relies on 0x2A37).
     private var marginalRadio = MarginalRadioDetector()
@@ -664,9 +699,6 @@ public final class BLEManager: NSObject, ObservableObject {
     private var reassembler = Reassembler()
     private var seq: UInt8 = 0
     private var didBond = false
-    /// WHOOP 5/MG only: realtime HR has been armed (puffin TOGGLE_REALTIME_HR sent) once for this
-    /// connection, so the post-bond callback re-firing on later `.withResponse` writes doesn't re-send it.
-    private var whoop5RealtimeArmed = false
     /// Once-per-connection guard for the 5/MG offload kick (connectHandshakeDone + requestSync +
     /// startBackfillTimer). Stops the HISTORY_END acks re-entering didWriteValueFor from re-triggering
     /// the offload mid-stream (the 5/MG twin of the WHOOP4 connectHandshakeDone ack-storm guard).
@@ -1180,9 +1212,11 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Pin connections to ONE specific strap by its CBPeripheral.identifier.uuidString. The app sets
     /// this to the active device's persisted `peripheralId` when it has one; pass nil to clear it
     /// (back to "connect to the first WHOOP discovered" — the single-WHOOP default). An unparseable
-    /// string clears the pin rather than wedging the scan. Only `didDiscover` reads it; setting it
-    /// does NOT start/stop/redirect an in-flight connection on its own.
+    /// string clears the pin rather than wedging the scan. A newly loaded valid pin may redirect an
+    /// ordinary automatic scan to CoreBluetooth's retrieved peripheral; presentation scans, restoration,
+    /// connected links, bond-loop pauses, and scan fallback continue untouched otherwise.
     public func setPreferredPeripheral(_ uuidString: String?) {
+        let previous = preferredPeripheralUUID
         let resolved = uuidString.flatMap { UUID(uuidString: $0) }   // nil for unparseable → clears the pin
         // A genuinely NEW pin starts the #52 refusal streak clean — the old streak belonged to the strap we
         // were pinned to before, not this one. Re-applying the SAME pin (the common no-op when the active
@@ -1193,6 +1227,39 @@ public final class BLEManager: NSObject, ObservableObject {
             if resolved != readoptingTo { readoptingTo = nil }
         }
         preferredPeripheralUUID = resolved
+
+        guard let resolved else { return }
+        let canAttemptRedirect = Self.preferredPeripheralRedirectPlan(
+            previousPin: previous,
+            incomingPin: uuidString,
+            isPresentingScan: isPresentingScan,
+            hasRestoredPeripheral: restoredPeripheral != nil,
+            isConnected: state.connected || peripheral?.state == .connected,
+            isScanning: central.isScanning,
+            autoReconnectPausedForBondLoop: autoReconnectPausedForBondLoop,
+            retrievedTargetAvailable: true)
+        guard case .redirectToRetrievedPeripheral = canAttemptRedirect else { return }
+
+        guard let target = central.retrievePeripherals(withIdentifiers: [resolved]).first else {
+            if case .keepScanningForPreferred = Self.preferredPeripheralRedirectPlan(
+                previousPin: previous,
+                incomingPin: uuidString,
+                isPresentingScan: isPresentingScan,
+                hasRestoredPeripheral: restoredPeripheral != nil,
+                isConnected: state.connected || peripheral?.state == .connected,
+                isScanning: central.isScanning,
+                autoReconnectPausedForBondLoop: autoReconnectPausedForBondLoop,
+                retrievedTargetAvailable: false) {
+                log("Preferred strap \(resolved) applied during scan, but CoreBluetooth could not retrieve it yet — keeping scan and fallback active")
+            }
+            return
+        }
+
+        cancelScanFallback()
+        central.stopScan()
+        log("Preferred strap \(resolved) applied during scan — redirecting to targeted reconnect")
+        preparePeripheral(target)
+        central.connect(target, options: nil)
     }
 
     /// True when `p` is the strap we're pinned to — or when no pin is set (the single-WHOOP default, so
@@ -1899,36 +1966,39 @@ public final class BLEManager: NSObject, ObservableObject {
     /// offload while connected+bonded and not already backfilling — the primary metric sync.
     // MARK: - Keep-alive (always-ping + liveness watchdog)
 
-    /// Enable live HR and remember we want it re-armed by keep-alive.
-    /// Some WHOOP firmware acknowledges TOGGLE_REALTIME_HR but only emits usable live samples once
-    /// the R10/R11 realtime stream is also on. Keep that stream scoped to the Live tab and stop it
-    /// on disappear so it does not permanently compete with historical offload.
-    public func startRealtime() {
-        screenWantsRealtime = true
-        state.liveFeedActive = true   // drives the menu-bar Start/Stop label off the real intent
-        // The user explicitly (re-)asked for the full stream by opening Live / tapping Start HR — give the
-        // heavy R10/R11 burst another chance even if a prior marginal-radio fallback had tripped. If the
-        // radio still can't take it, the detector will simply trip again. (#80) This is screen-only intent;
-        // the continuous-capture path does NOT reset the fallback (it's a passive background want).
-        marginalRadio.reset()
-        standardHRFallback = false
-        state.standardHRMode = nil
-        enableLiveNotifications(reason: "start realtime")
-        send(.sendR10R11Realtime, payload: [0x01])   // the heavy burst rides alongside the toggle on Live
-        reconcileRealtime()                          // arms TOGGLE_REALTIME_HR(1) on the off→on edge
-        realtimeArmedAt = Date()       // start the arm→drop stopwatch for the marginal-radio detector
+    /// Replace the explicit realtime owner set. Set insertion/removal is handled in AppModel; BLEManager
+    /// receives the resulting intent snapshot and reconciles it with scene state plus passive capture.
+    func setRealtimeDemandOwners(_ owners: Set<RealtimeDemandOwner>) {
+        let addedOwners = owners.subtracting(realtimeDemandOwners)
+        realtimeDemandOwners = owners
+        state.liveFeedActive = !owners.isEmpty
+        if !addedOwners.isEmpty {
+            // A fresh explicit owner is the user/app asking for the full realtime experience again. Give
+            // the WHOOP4 heavy stream another chance; passive capture never reaches this path.
+            marginalRadio.reset()
+            standardHRFallback = false
+            state.standardHRMode = nil
+        }
+        if !owners.isEmpty {
+            enableLiveNotifications(reason: "realtime owner")
+        }
+        reconcileRealtime()
     }
-    /// Stop the Live-tab realtime streams. The lightweight 0x2A37 HR keeps recording if firmware emits it.
-    /// The TOGGLE only actually disarms if the continuous-capture preference no longer wants it either —
-    /// the reconciler sends it on the on→off edge of the combined want, so a Live screen closing while
-    /// continuous capture is on keeps the dense stream flowing.
-    public func stopRealtime() {
-        screenWantsRealtime = false
-        state.liveFeedActive = false   // flip the menu-bar toggle back to "Start live feed"
-        // Always stop the heavy R10/R11 burst when the Live screen leaves — it's the battery-hungry part
-        // and is only ever wanted while a live screen is up. The lightweight TOGGLE/0x2A37 R-R stream is
-        // what continuous capture keeps; the reconciler decides whether to disarm that.
-        send(.sendR10R11Realtime, payload: [0x00])
+
+    /// Re-send currently wanted realtime commands without acquiring an owner. Used on reconnect/bond
+    /// transitions where the strap forgot sent state but AppModel owner intent is still valid.
+    func rearmRealtimeIfWanted() {
+        let demand = currentRealtimeDemand(trigger: .postBond)
+        guard demand.toggleWanted || demand.heavyWhoop4Wanted else { return }
+        enableLiveNotifications(reason: "rearm realtime")
+        reconcileRealtime(trigger: .postBond, forceWantedCommands: true)
+    }
+
+    /// Scene foreground changes suppress only the Live-screen owner. Workout, live-session and manual
+    /// owners remain explicit demand, and passive capture remains window-gated.
+    func setAppForeground(_ foreground: Bool) {
+        guard appForeground != foreground else { return }
+        appForeground = foreground
         reconcileRealtime()
     }
 
@@ -1960,22 +2030,66 @@ public final class BLEManager: NSObject, ObservableObject {
             endMin: d.object(forKey: ContinuousHrvSchedule.quietEndKey) as? Int ?? ContinuousHrvSchedule.defaultEndMinutes)
     }
 
-    /// Single reconciler for the realtime-HR TOGGLE. The stream should be armed while EITHER a screen
-    /// wants it (`screenWantsRealtime`) OR the continuous-capture preference wants it
-    /// (`keepRealtimeForData`, window-gated by #927 overnight-only via `continuousCaptureWantsNow()`).
-    /// We arm (TOGGLE_REALTIME_HR 1) / disarm (TOGGLE_REALTIME_HR 0) ONLY on the
-    /// false↔true edge of that derived want — so a Live screen closing while the preference still wants
-    /// it does NOT disarm, and turning the preference off with no screen open DOES disarm. The toggle only
-    /// reaches the strap once it's a WHOOP4 (custom channels open immediately) or a bonded 5/MG (puffin
-    /// framing); otherwise the want is remembered and the post-bond branch arms it. Mirrors the Android
-    /// `reconcileRealtime`.
-    private func reconcileRealtime() {
-        let want = screenWantsRealtime || continuousCaptureWantsNow()
-        wantsRealtime = want   // keep-alive + post-bond arm-on-connect read this derived value
-        guard want != realtimeArmed else { return }                      // no edge — nothing to send
-        guard selectedModel.deviceFamily == .whoop4 || state.bonded else { return }   // can't reach the strap yet
-        realtimeArmed = want
-        send(.toggleRealtimeHR, payload: [want ? 0x01 : 0x00])
+    private func currentRealtimeDemand(trigger: RealtimeDemandReconcileTrigger = .inputChange)
+        -> RealtimeDemandOutput {
+        RealtimeDemandPolicy.evaluate(
+            deviceFamily: selectedModel.deviceFamily,
+            owners: realtimeDemandOwners,
+            appForeground: appForeground,
+            passiveCaptureWanted: continuousCaptureWantsNow(),
+            marginalRadioFallback: standardHRFallback,
+            trigger: trigger
+        )
+    }
+
+    private func heavyDemandIgnoringFallback() -> Bool {
+        RealtimeDemandPolicy.evaluate(
+            deviceFamily: selectedModel.deviceFamily,
+            owners: realtimeDemandOwners,
+            appForeground: appForeground,
+            passiveCaptureWanted: continuousCaptureWantsNow(),
+            marginalRadioFallback: false
+        ).heavyWhoop4Wanted
+    }
+
+    /// Single realtime reconciler. Toggle demand and WHOOP4 heavy R10/R11 demand are derived separately:
+    /// passive capture can hold the toggle open but never asks for R10/R11, WHOOP5/MG only gets the
+    /// puffin toggle, and marginal-radio fallback suppresses heavy demand without dropping the toggle.
+    @discardableResult
+    private func reconcileRealtime(trigger: RealtimeDemandReconcileTrigger = .inputChange,
+                                   forceWantedCommands: Bool = false)
+        -> RealtimeDemandOutput {
+        let demand = currentRealtimeDemand(trigger: trigger)
+        lastRealtimeDemand = demand
+
+        let heavyWanted = demand.heavyWhoop4Wanted
+        let shouldSendHeavy = selectedModel.deviceFamily == .whoop4
+            && state.connected
+            && (heavyWanted != heavyWhoop4RealtimeArmed || (forceWantedCommands && heavyWanted))
+        if shouldSendHeavy {
+            heavyWhoop4RealtimeArmed = heavyWanted
+            send(.sendR10R11Realtime, payload: [heavyWanted ? 0x01 : 0x00])
+            realtimeArmedAt = heavyWanted ? Date() : nil
+        } else if selectedModel.deviceFamily != .whoop4 {
+            heavyWhoop4RealtimeArmed = false
+            realtimeArmedAt = nil
+        }
+
+        if selectedModel.deviceFamily == .whoop4,
+           standardHRFallback,
+           heavyDemandIgnoringFallback() {
+            state.standardHRMode = "Standard HR mode (low bandwidth) - your Bluetooth radio couldn't sustain the full stream; live heart rate via the standard profile."
+        }
+
+        let canSendToggle = state.connected && (selectedModel.deviceFamily == .whoop4 || state.bonded)
+        let toggleWanted = demand.toggleWanted
+        if canSendToggle,
+           toggleWanted != toggleRealtimeArmed || (forceWantedCommands && toggleWanted) {
+            toggleRealtimeArmed = toggleWanted
+            send(.toggleRealtimeHR, payload: [toggleWanted ? 0x01 : 0x00])
+        }
+
+        return demand
     }
 
     /// EXPERIMENTAL R22 telemetry (#174): give the user (and us) live proof of what the strap is doing.
@@ -2174,34 +2288,28 @@ public final class BLEManager: NSObject, ObservableObject {
             return
         }
         guard !backfilling else { return }            // never poke the strap mid-offload
-        // #927: continuous capture can be overnight-only, which makes the want TIME-dependent; nothing
-        // else re-evaluates it while the app just sits connected, so the keep-alive tick re-derives it.
-        // A window-close tick DISARMS (stop the heavy R10/R11 burst, then the reconciler sends TOGGLE 0
-        // on the true→false edge; the same stop shape as stopRealtime). A window-open tick re-arms on
-        // the false→true edge. Ticks with no transition cost one predicate evaluation. This runs BEFORE
-        // the WHOOP4-only guard below so a 5/MG stream also disarms/re-arms on the window edges (send()
-        // routes the 5/MG toggle and drops the WHOOP4-framed R10/R11 stop for it).
-        let captureWantNow = screenWantsRealtime || continuousCaptureWantsNow()
-        if wantsRealtime != captureWantNow, keepRealtimeForData, !screenWantsRealtime {
-            if captureWantNow {
-                log("Continuous HRV: overnight window opened; arming the realtime stream (#927)")
-            } else {
-                send(.sendR10R11Realtime, payload: [0x00])   // stop the heavy burst, like stopRealtime
-                log("Continuous HRV: overnight window closed; realtime stream disarmed until tonight (#927)")
-            }
+        // #927: continuous capture can be overnight-only, which makes passive toggle demand
+        // time-dependent; keep-alive re-derives it even if no owner changed.
+        let previousDemand = lastRealtimeDemand
+        let demand = reconcileRealtime()
+        if keepRealtimeForData, realtimeDemandOwners.isEmpty,
+           previousDemand.toggleWanted != demand.toggleWanted {
+            log(demand.toggleWanted
+                ? "Continuous HRV: overnight window opened; arming realtime toggle (#927)"
+                : "Continuous HRV: overnight window closed; realtime toggle disarmed until tonight (#927)")
         }
-        reconcileRealtime()   // recomputes wantsRealtime from the fresh predicate; toggles only on an edge
         // The command pings below are WHOOP4-framed; a 5/MG link drops them at the send() guard, so
         // skip them for 5/MG (it keeps the experimental strap log clean — re-subscribe + the 120s
         // bounce above are what keep a 5/MG link healthy).
         guard selectedModel.deviceFamily == .whoop4 else { return }
-        // Never re-arm the heavy R10/R11 burst once the marginal-radio fallback has tripped (#80) — that
-        // would just re-trigger the drop the keep-alive is meant to prevent. 0x2A37 keeps the HR flowing.
-        if wantsRealtime && !standardHRFallback {
-            realtimeArmed = true   // keep reconcileRealtime()'s edge tracking in sync with the re-arm
+        // The 30s keep-alive may re-send a wanted WHOOP4 heavy command, but only from the derived heavy
+        // demand. Passive toggle-only capture must never manufacture R10/R11 demand.
+        if demand.heavyWhoop4Wanted {
+            heavyWhoop4RealtimeArmed = true
+            toggleRealtimeArmed = true
             send(.sendR10R11Realtime, payload: [0x01])
             send(.toggleRealtimeHR, payload: [0x01])
-        }   // re-arm so it can't lapse
+        }
         keepAliveTick += 1
         if keepAliveTick % 2 == 0 { send(.getBatteryLevel, payload: []) }  // ~every 60s
     }
@@ -2751,14 +2859,12 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         state.charging = nil          // a stale charging flag must not outlive the link
         state.strapFirmware = nil     // a stale firmware version must not outlive the link
         state.clearBiometrics()       // and a stale HR / R-R must not outlive the link either
-        state.liveFeedActive = false  // a drop while Live is open must not leave a stale "Stop live feed"
         didBond = false
-        whoop5RealtimeArmed = false
-        // The strap forgets the realtime-HR toggle across a disconnect; the post-bond branch re-arms it
-        // from `wantsRealtime`. Clear only the "what we last sent" flag — `screenWantsRealtime` /
-        // `keepRealtimeForData` (and thus `wantsRealtime`) are intent and must survive a reconnect so the
-        // stream comes back automatically.
-        realtimeArmed = false
+        // The strap forgets sent realtime state across disconnect. Clear only sent-state flags; explicit
+        // owners and passive-capture preference are intent and must survive so reconnect can re-arm.
+        toggleRealtimeArmed = false
+        heavyWhoop4RealtimeArmed = false
+        lastRealtimeDemand = currentRealtimeDemand(trigger: .disconnectReset)
         whoop5SessionStarted = false
         clockRequested = false
         connectHandshakeDone = false
@@ -3134,20 +3240,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 requestNotify(c, on: peripheral, reason: "post-bond puffin")
             }
             enableLiveNotifications(reason: "post-bond 5/MG")   // standard HR/battery that failed pre-bond
-            // Arm realtime HR with puffin framing — the verified step that makes a bonded 5/MG strap start
-            // streaming (issue #17). Once per connection; keep-alive skips 5/MG, so this is the trigger.
-            // (Opening Live later also arms it via startRealtime(), now that send() routes the 5/MG toggle.)
-            // #927: RE-DERIVE the want at arm time, never the precomputed `wantsRealtime`: that value can
-            // be up to a keep-alive tick (30 s) stale, and a reconnect just OUTSIDE the overnight window
-            // would re-arm the flood from it and stay armed until the next tick.
-            let realtimeWantNow = screenWantsRealtime || continuousCaptureWantsNow()
-            wantsRealtime = realtimeWantNow
-            if realtimeWantNow && !whoop5RealtimeArmed {
-                whoop5RealtimeArmed = true
-                realtimeArmed = true   // keep reconcileRealtime()'s edge tracking in sync with the arm
-                log("WHOOP 5/MG: arming realtime HR (puffin TOGGLE_REALTIME_HR)")
-                send(.toggleRealtimeHR, payload: [0x01])
-            }
+            // Arm realtime HR with puffin framing when policy requests the toggle. WHOOP5/MG never sends
+            // WHOOP4 R10/R11; owners and passive capture both map to the puffin toggle only.
+            reconcileRealtime(trigger: .postBond)
             startKeepAlive()                                    // re-subscribe + liveness watchdog
             // Kick the historical offload ONCE per connection — this is the 5/MG edition of the WHOOP4
             // connect-handshake (lines below). didWriteValueFor re-enters this `.whoop5` branch on EVERY
@@ -3227,6 +3322,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             send(.getClock, payload: [0x00])
         }
         send(.sendR10R11Realtime, payload: [0x00])   // stop the type-43 realtime flood (BLE airtime/battery)
+        heavyWhoop4RealtimeArmed = false
+        realtimeArmedAt = nil
         send(.getDataRange)                          // refresh the strap's stored range for the watchdog
         // Plain offload (no high-freq-sync), rate-limited (first connect always runs; reconnect-flaps are
         // throttled by BackfillPolicy). Deferred ~1.5s so SET_CLOCK/GET_DATA_RANGE round-trip first and
@@ -3236,28 +3333,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         startBackfillTimer()   // re-offload the type-47 store every backfillIntervalSeconds
         startKeepAlive()       // always-ping: re-arm realtime, poll battery, watchdog the link
         enableLiveNotifications(reason: "post-bond")   // includes 0x2A37 standard HR — the fallback path
-        // #927: RE-DERIVE the want at arm time (same reasoning as the 5/MG branch above): a reconnect
-        // outside the overnight window must not arm the flood from a stale precomputed `wantsRealtime`
-        // (up to a keep-alive tick stale); the keep-alive would then hold it armed for another 30 s.
-        let realtimeWantNow = screenWantsRealtime || continuousCaptureWantsNow()
-        wantsRealtime = realtimeWantNow
-        if realtimeWantNow {
-            if standardHRFallback {
-                // #80: this radio repeatedly dropped the link the instant we armed the R10/R11 burst.
-                // Skip the heavy stream entirely; live HR rides the already-subscribed low-bandwidth
-                // 0x2A37 standard profile (subscribed by enableLiveNotifications above). SAFE either way:
-                // if 0x2A37 emits the user gets live HR on a radio that otherwise died; if it doesn't, at
-                // least the arm→die loop stops.
-                log("Realtime HR: standard-HR mode (low bandwidth) — skipping R10/R11 arm (#80)")
-                state.standardHRMode = "Standard HR mode (low bandwidth) - your Bluetooth radio couldn't sustain the full stream; live heart rate via the standard profile."
-            } else {
-                log("Realtime HR: arming after bond")
-                realtimeArmed = true   // keep reconcileRealtime()'s edge tracking in sync with the arm
-                send(.sendR10R11Realtime, payload: [0x01])
-                send(.toggleRealtimeHR, payload: [0x01])
-                realtimeArmedAt = Date()   // start the arm→drop stopwatch for the marginal-radio detector
-            }
-        }
+        // Re-derive demand at arm time: passive capture may want only the toggle, explicit owners may
+        // want WHOOP4 heavy, and marginal-radio fallback suppresses only heavy demand.
+        reconcileRealtime(trigger: .postBond)
     }
 
     /// SET_CLOCK(10) payload — the 8-byte form `[seconds u32 LE][subseconds u32 LE]`, subseconds in

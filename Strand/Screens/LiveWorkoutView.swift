@@ -74,15 +74,15 @@ struct LiveWorkoutView: View {
         // starting a manual workout straight from Workouts (Live never opened) left `model.bpm == nil` —
         // captureWorkoutSample bailed on every sample and endWorkout silently discarded the empty
         // session. Ref-counted in AppModel, so when this sheet sits over an already-armed Live tab the
-        // two balance and neither disarms the other (mirrors Android LiveWorkoutScreen's DisposableEffect
-        // requestRealtimeHr/releaseRealtimeHr). Balanced: one start on appear, one stop on disappear.
+        // two balance and neither disarms the other. Balanced: one owner acquire on appear, one release
+        // on disappear.
         .onAppear {
-            model.startRealtimeHR()
+            model.acquireRealtime(.workout)
             // Hold the display awake for the session only if the user opted in (#703).
             if keepScreenOn { ScreenIdle.keepAwake(true) }
         }
         .onDisappear {
-            model.stopRealtimeHR()
+            model.releaseRealtime(.workout)
             // Always release on the way out so the system idle timer resumes. Even if the toggle was
             // flipped off mid-workout, this clears any hold we placed.
             ScreenIdle.keepAwake(false)

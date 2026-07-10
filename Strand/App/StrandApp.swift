@@ -46,7 +46,10 @@ struct StrandApp: App {
                 // clipping; the common Larger-Text range still scales fully.
                 .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                 .onChangeCompat(of: scenePhase) { phase in
-                    if phase == .background || phase == .inactive {
+                    if phase == .active {
+                        model.setAppForeground(true)
+                    } else if phase == .background || phase == .inactive {
+                        model.setAppForeground(false)
                         model.flushPerformanceState()
                     }
                 }

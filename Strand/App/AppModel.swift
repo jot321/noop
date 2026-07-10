@@ -364,8 +364,8 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         AppModel.shared = self   // publish for App Intents (Shortcuts) , see the static above (#42)
         PerformanceFlushRegistry.install(self)
 
-        // Seed the BLE client with the persisted "Continuous HRV capture" intent so `wantsRealtime`
-        // reflects it from launch , the reconciler then arms the dense stream as soon as the strap bonds
+        // Seed the BLE client with the persisted "Continuous HRV capture" intent so passive toggle
+        // demand reflects it from launch; the reconciler then arms it as soon as the strap bonds
         // (and the bond sink above re-applies it on every reconnect).
         ble.setKeepRealtimeForData(PuffinExperiment.keepRealtimeForDataEnabled)
 
@@ -815,7 +815,7 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
 
     /// Drop the smoothing window and blank the hero number so a resume / re-attach shows ","
     /// until a genuinely fresh sample arrives, instead of republishing the stale pre-gap median.
-    /// Called on Live-tab entry / manual Start HR (see `startRealtimeHR`), NOT on the 30s keep-alive
+    /// Called on first realtime-owner acquisition, NOT on the 30s keep-alive
     /// re-arm , so steady-state smoothing is untouched. Fixes #46 (HR jumped to a stale ~100 on
     /// reopen, then "slowly came back down" as fresh low samples refilled the window).
     func resetSmoothing() {
@@ -1011,43 +1011,39 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
             .store(in: &ouraAdoptCancellables)
     }
 
-    /// How many on-screen surfaces currently want the realtime HR stream (the Live tab and the
-    /// in-exercise LiveWorkoutView, which can be open at the same time , the workout sheet sits over
-    /// Live, or is reached straight from the Workouts tab without Live ever appearing). The stream
-    /// stays armed while ANY of them is visible, so a second surface arming it never disarms it out
-    /// from under the first (#681 , a WHOOP 5/MG manual workout started without first opening Live got
-    /// no live HR, so every sample was dropped and the session was silently discarded). Ref-counted to
-    /// match Android's `realtimeWanters` (AppViewModel.requestRealtimeHr/releaseRealtimeHr).
-    private var realtimeWanters = 0
+    /// Explicit owners currently asking for realtime HR/R-R. A set makes duplicate appear/disappear
+    /// events idempotent: reconnect can re-arm without acquiring, and one owner cannot leak a count.
+    @Published private var realtimeOwners = Set<RealtimeDemandOwner>()
 
-    /// A surface that shows live HR appeared. Arms the realtime stream on the 0→1 edge , and ONLY on
-    /// that edge blanks the stale smoothing window (#46) so a resume shows "," until a fresh sample
-    /// lands, never re-clearing an already-live window when a second concurrent HR surface opens. The
-    /// keep-alive re-arm goes through `ble.startRealtime()` directly, NOT here, so steady-state is
-    /// untouched. Each surface must balance this with exactly one `stopRealtimeHR()` on disappear.
-    func startRealtimeHR() {
-        if realtimeWanters == 0 {
-            resetSmoothing()
-            ble.startRealtime()
-        }
-        realtimeWanters += 1
-    }
-    /// A live-HR surface went away. Stops the realtime stream only when the last one leaves (1→0 edge);
-    /// the lightweight 0x2A37 HR keeps recording regardless. Clamped at 0 so an unbalanced extra stop
-    /// can't drive the count negative and wedge the stream off.
-    func stopRealtimeHR() {
-        realtimeWanters = max(0, realtimeWanters - 1)
-        if realtimeWanters == 0 { ble.stopRealtime() }
+    var hasActiveRealtimeExperience: Bool { !realtimeOwners.isEmpty }
+    var hasManualRealtimeControl: Bool { realtimeOwners.contains(.manualControl) }
+
+    /// A realtime owner appeared. Arms on first active owner and only then blanks stale smoothing (#46),
+    /// so a second concurrent owner cannot clear an already-live window.
+    func acquireRealtime(_ owner: RealtimeDemandOwner) {
+        let wasEmpty = realtimeOwners.isEmpty
+        let inserted = realtimeOwners.insert(owner).inserted
+        guard inserted else { return }
+        if wasEmpty { resetSmoothing() }
+        ble.setRealtimeDemandOwners(realtimeOwners)
     }
 
-    /// Re-issue the BLE realtime arm WITHOUT touching the ref-count , used when a fresh
-    /// connection/bond lands while a surface is already showing live HR (Apple's `ble.startRealtime()`
-    /// must be re-sent on a new connection). A no-op when nothing wants the stream, so a stray
-    /// connection event can't arm it behind a closed Live tab. Mirrors that Android re-arms via its
-    /// own keep-alive rather than re-calling `requestRealtimeHr` on reconnect.
+    /// A realtime owner went away. The BLE layer derives whether toggle/heavy streams should actually
+    /// stop, allowing passive continuous-HRV capture to keep only the lightweight toggle if needed.
+    func releaseRealtime(_ owner: RealtimeDemandOwner) {
+        guard realtimeOwners.remove(owner) != nil else { return }
+        ble.setRealtimeDemandOwners(realtimeOwners)
+    }
+
+    /// Re-issue BLE realtime commands WITHOUT touching owners, used when a fresh connection/bond lands
+    /// while intent already exists. Reconnect never acquires a second owner.
     func rearmRealtimeIfWanted() {
-        guard realtimeWanters > 0 else { return }
-        ble.startRealtime()
+        guard hasActiveRealtimeExperience else { return }
+        ble.rearmRealtimeIfWanted()
+    }
+
+    func setAppForeground(_ foreground: Bool) {
+        ble.setAppForeground(foreground)
     }
     /// Ask the strap for a fresh battery reading.
     func getBattery() { ble.refreshBattery() }

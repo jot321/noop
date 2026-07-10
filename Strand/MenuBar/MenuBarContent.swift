@@ -288,11 +288,15 @@ public struct MenuBarContent: View {
         VStack(spacing: 8) {
             if live.bonded {
                 menuButton(
-                    live.liveFeedActive ? "Stop live feed" : "Start live feed",
-                    systemImage: live.liveFeedActive ? "pause.fill" : "play.fill",
+                    model.hasManualRealtimeControl ? "Stop live feed" : "Start live feed",
+                    systemImage: model.hasManualRealtimeControl ? "pause.fill" : "play.fill",
                     tone: .accent
                 ) {
-                    if live.liveFeedActive { model.stopRealtimeHR() } else { model.startRealtimeHR() }
+                    if model.hasManualRealtimeControl {
+                        model.releaseRealtime(.manualControl)
+                    } else {
+                        model.acquireRealtime(.manualControl)
+                    }
                 }
             } else {
                 menuButton(

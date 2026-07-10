@@ -204,12 +204,12 @@ private struct LiveScreenContent: View, Equatable {
             }
         }
         .onAppear { refreshLiveSession(); consumeActiveWorkoutRequest() }
-        .onDisappear { model.stopRealtimeHR() }
+        .onDisappear { model.releaseRealtime(.liveScreen) }
         // A fresh bond/connection re-arms the BLE stream (Apple must re-send startRealtime on a new
-        // connection) WITHOUT bumping the ref-count — `refreshLiveSession`'s `startRealtimeHR` already
-        // counted this screen once on `.onAppear`, balanced by the single `stopRealtimeHR` above.
-        // Re-counting here (multiple bonded/connected events per appearance, one disappear) would leave
-        // the stream stuck armed after leaving Live (#681 ref-count balance).
+        // connection) WITHOUT acquiring another owner — `refreshLiveSession` already owns `.liveScreen`,
+        // balanced by the single release above. Re-acquiring here (multiple bonded/connected events per
+        // appearance, one disappear) would leave
+        // the stream stuck armed after leaving Live (#681 owner balance).
         .onChangeCompat(of: snapshot.bonded) { _ in reconnectLiveSession() }
         .onChangeCompat(of: snapshot.connected) { _ in reconnectLiveSession() }
         // Live workout mode (#238): open the in-exercise screen the moment a workout starts.
@@ -701,11 +701,11 @@ private struct LiveScreenContent: View, Equatable {
         .disabled(!live.connected)
     }
 
-    /// Live tab appeared: take a ref-count on the realtime stream (arms it on the 0→1 edge) and pull a
-    /// battery reading. Balanced by the single `stopRealtimeHR()` on `.onDisappear`.
+    /// Live tab appeared: acquire the Live-screen realtime owner and pull a battery reading. Balanced by
+    /// the single `.liveScreen` release on `.onDisappear`.
     private func refreshLiveSession() {
         guard activeConnection else { return }
-        model.startRealtimeHR()
+        model.acquireRealtime(.liveScreen)
         model.getBattery()
     }
 
@@ -721,7 +721,7 @@ private struct LiveScreenContent: View, Equatable {
     }
 
     /// A fresh bond/connection landed while the Live tab is up: re-arm the BLE stream (Apple re-sends
-    /// startRealtime on a new connection) and refresh battery — WITHOUT taking another ref-count, since
+    /// startRealtime on a new connection) and refresh battery — WITHOUT acquiring another owner, since
     /// these events can fire several times per appearance against the single `.onDisappear` release.
     private func reconnectLiveSession() {
         guard activeConnection else { return }

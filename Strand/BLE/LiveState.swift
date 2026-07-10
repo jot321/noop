@@ -32,10 +32,9 @@ public final class LiveState: ObservableObject {
     /// radio-off / connect-fail / disconnect). Twin of the Android LiveState.streamingLiveHR.
     @Published public var streamingLiveHR: Bool = false
     @Published public var heartRate: Int? = nil
-    /// Whether the heavy R10/R11 realtime burst is currently armed (the "live feed"). Tracks the
-    /// realtime INTENT (startRealtime/stopRealtime), NOT `heartRate` — the lightweight 0x2A37 profile
-    /// keeps setting heartRate while bonded, so a heartRate-driven toggle could never read "off". The
-    /// menu-bar Start/Stop-live-feed button reads this.
+    /// Whether any explicit realtime owner is active. Tracks owner intent, NOT `heartRate` or the BLE
+    /// sent-state; the lightweight 0x2A37 profile can keep setting heartRate while no explicit owner is
+    /// active.
     @Published public var liveFeedActive: Bool = false
     /// Latest R-R packet exactly as it arrived from the strap. Keep this as the "fresh packet"
     /// surface for stress/breathing logic that reacts to the most recent arrival (and the standard
