@@ -34,9 +34,15 @@ enum StandardHRPublicationPlan {
 }
 
 enum DisconnectCallbackFinalization {
-    static func run(diagnostics: () -> Void, disconnectEdge: () -> Void) {
+    static func run(
+        diagnostics: () -> Void,
+        disconnectEdge: () -> Bool,
+        finalFlush: () -> Void
+    ) {
         diagnostics()
-        disconnectEdge()
+        if !disconnectEdge() {
+            finalFlush()
+        }
     }
 }
 
@@ -3029,9 +3035,14 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 }
             },
             disconnectEdge: {
-                // AppModel observes this edge synchronously and flushes workout, stress, and the log
-                // tail once. Keeping it last includes every diagnostic emitted above in that flush.
+                // AppModel normally observes this edge synchronously. A removal/model-switch may have
+                // published false already, so the explicit final callback below is the durability edge.
+                let publishedNewEdge = state.connected
                 state.connected = false
+                return publishedNewEdge
+            },
+            finalFlush: {
+                state.onDisconnectFinalized?()
             }
         )
     }

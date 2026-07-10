@@ -408,19 +408,27 @@ final class ActiveWorkoutRealtimeOwnershipTests: XCTestCase {
         var lifecycle = ActiveWorkoutRealtimeOwnership()
         var owners = RealtimeOwnerCoordinator()
 
-        apply(lifecycle.workoutDidBegin(), to: &owners)
-        // Dismissing the sheet is deliberately not a workout-lifetime transition.
+        apply(
+            lifecycle.workoutActivityChanged(wasActive: false, isActive: true),
+            to: &owners
+        )
+        apply(
+            lifecycle.workoutActivityChanged(wasActive: true, isActive: true),
+            to: &owners
+        )
 
         XCTAssertEqual(owners.owners, [.workout])
         XCTAssertTrue(lifecycle.ownsRealtime)
-        XCTAssertNil(lifecycle.workoutDidBegin(), "Repeated start must not acquire twice")
     }
 
     func testRehydratedWorkoutAcquiresOwner() {
         var lifecycle = ActiveWorkoutRealtimeOwnership()
         var owners = RealtimeOwnerCoordinator()
 
-        apply(lifecycle.workoutDidBegin(), to: &owners)
+        apply(
+            lifecycle.workoutActivityChanged(wasActive: false, isActive: true),
+            to: &owners
+        )
 
         XCTAssertEqual(owners.owners, [.workout])
         XCTAssertTrue(lifecycle.ownsRealtime)
@@ -429,13 +437,71 @@ final class ActiveWorkoutRealtimeOwnershipTests: XCTestCase {
     func testEndingWorkoutReleasesOwnerExactlyOnce() {
         var lifecycle = ActiveWorkoutRealtimeOwnership()
         var owners = RealtimeOwnerCoordinator()
-        apply(lifecycle.workoutDidBegin(), to: &owners)
+        apply(
+            lifecycle.workoutActivityChanged(wasActive: false, isActive: true),
+            to: &owners
+        )
 
-        apply(lifecycle.workoutWillEnd(), to: &owners)
-        let repeatedEnd = lifecycle.workoutWillEnd()
+        apply(
+            lifecycle.workoutActivityChanged(wasActive: true, isActive: false),
+            to: &owners
+        )
+        let repeatedEnd = lifecycle.workoutActivityChanged(wasActive: false, isActive: false)
 
         XCTAssertTrue(owners.owners.isEmpty)
         XCTAssertFalse(lifecycle.ownsRealtime)
         XCTAssertNil(repeatedEnd, "Repeated end must not release twice")
+    }
+}
+
+@MainActor
+final class AppModelWorkoutRealtimeIntegrationTests: XCTestCase {
+    private func makePersistence() -> ActiveWorkoutPersistenceCoordinator {
+        let suite = "test.workoutRealtime.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return ActiveWorkoutPersistenceCoordinator(
+            defaults: defaults,
+            snapshotInterval: 0.01,
+            queue: DispatchQueue(label: suite)
+        )
+    }
+
+    func testStartUpdateAndEndDriveProductionOwnerLifecycle() {
+        let model = AppModel(
+            activeWorkoutPersistence: makePersistence(),
+            activeWorkoutLoader: { nil }
+        )
+
+        XCTAssertTrue(model.activeRealtimeOwners.isEmpty)
+        model.startWorkout(sport: "Other")
+        XCTAssertEqual(model.activeRealtimeOwners, [.workout])
+
+        var updated = try! XCTUnwrap(model.activeWorkout)
+        updated.avgHr = 120
+        model.activeWorkout = updated
+        XCTAssertEqual(model.activeRealtimeOwners, [.workout])
+
+        model.endWorkout()
+        XCTAssertTrue(model.activeRealtimeOwners.isEmpty)
+    }
+
+    func testRehydrationAcquiresProductionWorkoutOwner() {
+        let snapshot = ActiveWorkoutPersistence.Snapshot(
+            startSec: Int(Date().timeIntervalSince1970) - 60,
+            sport: "Other",
+            samples: [],
+            avgHr: 0,
+            peakHr: 0,
+            liveStrain: 0
+        )
+        let model = AppModel(
+            activeWorkoutPersistence: makePersistence(),
+            activeWorkoutLoader: { snapshot }
+        )
+
+        XCTAssertNotNil(model.activeWorkout)
+        XCTAssertEqual(model.activeRealtimeOwners, [.workout])
+        model.endWorkout()
     }
 }

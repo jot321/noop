@@ -369,11 +369,14 @@ Status: deferred / not changed.
 Verification was run after `xcodegen generate`.
 
 - Full macOS tests:
-  `xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' -resultBundlePath .superpowers/sdd/verification/macos-full.xcresult test`
-  executed 877 tests: 874 passed, 1 skipped, 2 failed. The only failures were
+  `xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' -resultBundlePath .superpowers/sdd/verification/final-fix-macos-full.xcresult test`
+  executed 904 tests: 901 passed, 1 skipped, 2 failed. The only failures were
   the accepted baseline `TodayExplainabilityTests` localization-key failures:
   `testScoreState_carryWithinCap_isFreshLastNight` and
   `testScoreState_staleCarry_relabelsLatestSleep`.
+  A later review follow-up added two AppModel workout-lifecycle integration tests and strengthened
+  disconnect-finalization coverage; those affected test groups and the macOS build passed. The full
+  suite was not rerun solely to recount the two added tests.
 - macOS build:
   `xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' build`
   succeeded.

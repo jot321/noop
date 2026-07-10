@@ -117,7 +117,16 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// since; on End the window is scored via `StrainScorer` and saved as a `WorkoutRow` (source
     /// "manual"), which then shows in the Workouts view. The day's strain already counts this HR (it's
     /// the same live stream the store persists), so this is a per-session annotation, not a double-count.
-    @Published var activeWorkout: ActiveWorkout?
+    @Published var activeWorkout: ActiveWorkout? {
+        didSet {
+            applyWorkoutRealtimeMutation(
+                activeWorkoutRealtimeOwnership.workoutActivityChanged(
+                    wasActive: oldValue != nil,
+                    isActive: activeWorkout != nil
+                )
+            )
+        }
+    }
     /// The just-ended workout, for a brief inline confirmation on Live (cleared on the next start).
     @Published var lastWorkout: WorkoutRow?
 
@@ -134,7 +143,8 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// Android's `ActiveWorkout.gpsEnabled`.
     private var activeWorkoutIsGps = false
     private var activeWorkoutRuntime = ActiveWorkoutRuntime()
-    private let activeWorkoutPersistence = ActiveWorkoutPersistenceCoordinator()
+    private let activeWorkoutPersistence: ActiveWorkoutPersistenceCoordinator
+    private let activeWorkoutLoader: () -> ActiveWorkoutPersistence.Snapshot?
     private var activeWorkoutRealtimeOwnership = ActiveWorkoutRealtimeOwnership()
 
     /// A manual workout in progress. `samples` accumulate from the smoothed live `bpm`; `liveStrain`
@@ -236,7 +246,14 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// Daily re-arm timer for the single-instant firmware smart alarm (see scheduleDailySmartAlarmRearm).
     private var smartAlarmRearmTimer: Timer?
 
-    init() {
+    init(
+        activeWorkoutPersistence: ActiveWorkoutPersistenceCoordinator = ActiveWorkoutPersistenceCoordinator(),
+        activeWorkoutLoader: @escaping () -> ActiveWorkoutPersistence.Snapshot? = {
+            ActiveWorkoutPersistence.load()
+        }
+    ) {
+        self.activeWorkoutPersistence = activeWorkoutPersistence
+        self.activeWorkoutLoader = activeWorkoutLoader
         let live = LiveState()
         self.live = live
         // SEED every subsystem with the same id (`deviceId`, "my-whoop" at launch). The store/registry
@@ -282,6 +299,11 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
             guard let self, !connected else { return }
             self.flushPerformanceState()
         }.store(in: &hrCancellables)
+        live.onDisconnectFinalized = { [weak self] in
+            // A removal/model-switch can publish `connected = false` before CoreBluetooth's final
+            // callback. Flush again after its tail diagnostics even when Combine suppresses that edge.
+            self?.flushPerformanceState()
+        }
         Publishers.CombineLatest(behavior.$stressCheckIn, behavior.$stressAutoNudge)
             .map { StressStatePersistence.isEnabled(checkIn: $0, autoNudge: $1) }
             .removeDuplicates()
@@ -602,7 +624,6 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         let started = Date()
         activeWorkout = ActiveWorkout(start: started, sport: resolved)
         activeWorkoutRuntime = ActiveWorkoutRuntime()
-        applyWorkoutRealtimeMutation(activeWorkoutRealtimeOwnership.workoutDidBegin())
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -717,7 +738,7 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// analogue of Android's `rehydrateActiveNonGpsWorkout`. No-op when a workout is already live (a live
     /// session wins over a stale snapshot) or nothing is stored. Called once from `init`.
     private func rehydrateActiveWorkout() {
-        guard activeWorkout == nil, let snap = ActiveWorkoutPersistence.load() else { return }
+        guard activeWorkout == nil, let snap = activeWorkoutLoader() else { return }
         var w = ActiveWorkout(start: Date(timeIntervalSince1970: TimeInterval(snap.startSec)),
                               sport: snap.sport)
         w.samples = snap.samples
@@ -726,7 +747,6 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         w.liveStrain = snap.liveStrain
         activeWorkout = w
         activeWorkoutRuntime = ActiveWorkoutRuntime(restoredSamples: snap.samples)
-        applyWorkoutRealtimeMutation(activeWorkoutRealtimeOwnership.workoutDidBegin())
         activeWorkoutPersistence.start(activeWorkoutSnapshot(w))
     }
 
@@ -735,7 +755,6 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     /// with Android) , but a GPS-only walk with HR not streaming still saves. Double-buzz confirms.
     func endWorkout() {
         guard let w = activeWorkout else { return }
-        applyWorkoutRealtimeMutation(activeWorkoutRealtimeOwnership.workoutWillEnd())
         activeWorkout = nil
         activeWorkoutRuntime = ActiveWorkoutRuntime()
         let wasGps = activeWorkoutIsGps
@@ -1038,6 +1057,7 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         ).isEmpty
     }
     var hasManualRealtimeControl: Bool { realtimeOwnerCoordinator.owners.contains(.manualControl) }
+    var activeRealtimeOwners: Set<RealtimeDemandOwner> { realtimeOwnerCoordinator.owners }
 
     private func applyWorkoutRealtimeMutation(_ mutation: RealtimeOwnerMutation?) {
         switch mutation {

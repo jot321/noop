@@ -132,23 +132,36 @@ final class LogTailPersistenceTests: XCTestCase {
         XCTAssertEqual(events.snapshot.count, 1)
     }
 
-    func testDisconnectEdgeRunsAfterFinalDiagnosticsAndReconnectScheduling() {
-        var events: [String] = []
+    func testDisconnectFinalizationFlushesExactlyOnceAfterDiagnostics() {
+        for initiallyConnected in [true, false] {
+            var events: [String] = []
+            var connected = initiallyConnected
 
-        DisconnectCallbackFinalization.run(
-            diagnostics: {
-                events.append("final diagnostic")
-                events.append("reconnect scheduled")
-            },
-            disconnectEdge: {
-                events.append("disconnect edge flush")
-            }
-        )
+            DisconnectCallbackFinalization.run(
+                diagnostics: {
+                    events.append("final diagnostic")
+                    events.append("reconnect scheduled")
+                },
+                disconnectEdge: {
+                    let publishedNewEdge = connected
+                    connected = false
+                    if publishedNewEdge {
+                        events.append("disconnect edge flush")
+                    }
+                    return publishedNewEdge
+                },
+                finalFlush: {
+                    events.append("explicit final flush")
+                }
+            )
 
-        XCTAssertEqual(
-            events,
-            ["final diagnostic", "reconnect scheduled", "disconnect edge flush"]
-        )
+            XCTAssertEqual(
+                events,
+                initiallyConnected
+                    ? ["final diagnostic", "reconnect scheduled", "disconnect edge flush"]
+                    : ["final diagnostic", "reconnect scheduled", "explicit final flush"]
+            )
+        }
     }
 
     func testLoadingExistingPersistedTailSeedsSubsequentAppends() {

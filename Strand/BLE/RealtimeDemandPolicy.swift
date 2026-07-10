@@ -53,13 +53,17 @@ enum RealtimeOwnerMutation: Equatable {
 struct ActiveWorkoutRealtimeOwnership {
     private(set) var ownsRealtime = false
 
-    mutating func workoutDidBegin() -> RealtimeOwnerMutation? {
-        guard !ownsRealtime else { return nil }
-        ownsRealtime = true
-        return .acquire(.workout)
-    }
+    mutating func workoutActivityChanged(
+        wasActive: Bool,
+        isActive: Bool
+    ) -> RealtimeOwnerMutation? {
+        guard wasActive != isActive else { return nil }
+        if isActive {
+            guard !ownsRealtime else { return nil }
+            ownsRealtime = true
+            return .acquire(.workout)
+        }
 
-    mutating func workoutWillEnd() -> RealtimeOwnerMutation? {
         guard ownsRealtime else { return nil }
         ownsRealtime = false
         return .release(.workout)

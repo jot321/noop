@@ -302,6 +302,9 @@ public final class LiveState: ObservableObject {
     /// Fired (live only) when the strap reports it executed its firmware alarm
     /// (STRAP_DRIVEN_ALARM_EXECUTED). Wired by AppModel to re-arm the next day's alarm.
     public var onSmartAlarmFired: (() -> Void)?
+    /// Runs after a CoreBluetooth disconnect callback has appended its final diagnostics. Unlike the
+    /// `connected` publisher, this fires even when an earlier removal/model-switch already set false.
+    public var onDisconnectFinalized: (() -> Void)?
 
     /// True when the stuck-strap watchdog finds the strap has newer records than us but our frontier
     /// won't advance (likely needs a manual reboot; ~never after high-freq-sync removal). Banner-only.
