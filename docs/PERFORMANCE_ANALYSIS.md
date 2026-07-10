@@ -319,11 +319,15 @@ Status: deferred / not changed.
   recycle a healthy but quiet WHOOP4 link through disconnect, scan, re-bond, and
   backfill. That costs radio and catch-up work; distinguish a quiet healthy
   standard-HR link before forcing a reconnect.
-- `StrandiOS/Widgets/WidgetPublish.swift:43-46` and
-  `Strand/Data/WatchSessionBridge.swift:75-88,150`: widget/watch snapshot builds
-  read a 4,000-day `exploreSeries` before their spacing gates. This pays deep
-  history I/O for updates that may be discarded; check the gate first and read
-  only the anchor day's row.
+- `Strand/Data/WatchSessionBridge.swift:75-88,150`: the watch snapshot build
+  reads a 4,000-day `exploreSeries` before its documented 30-minute app-side
+  spacing and `shouldPush` gate. A rejected push has therefore already paid the
+  deep-read cost; apply the spacing check before that work where possible and
+  add narrow latest-day/night queries instead of reading deep history.
+- `StrandiOS/Widgets/WidgetPublish.swift:43-46`: `WidgetSnapshot.publish` has no
+  equivalent app-side spacing gate. Each invocation performs the deep
+  `exploreSeries` read, saves the snapshot, and requests a WidgetKit timeline
+  reload; add narrow latest-day/night queries and avoid the 4,000-day read.
 - `Strand/BLE/BLEManager.swift:502-503`: `uploadTimer` was declared but never
   started. Dead timer state increases maintenance ambiguity; remove it or wire
   it only if a current upload policy requires it.
