@@ -2478,6 +2478,21 @@ final class Repository: ObservableObject {
         return await hrBuckets(from: from, to: to, bucketSeconds: bucket)
     }
 
+    /// Post-workout heart-rate recovery for one session, computed ON DEMAND from the coalesced HR tail
+    /// around the workout end (measured + PPG, #156) — the detail screen's live view of the same
+    /// engine the nightly pass persists as the day-best `hrr60` key. First read source with a
+    /// measurable recovery wins (active strap first, mirroring every other union read). Nil when the
+    /// finish wasn't elevated or the strap stopped streaming — the card simply doesn't show.
+    func heartRateRecovery(workoutEnd: Int) async -> HRRecoveryEngine.Result? {
+        guard let store = await ensureStore() else { return nil }
+        for id in importedReadIds {
+            let hr = (try? await store.hrSamples(deviceId: id, from: workoutEnd - 30,
+                                                 to: workoutEnd + 135, limit: 500)) ?? []
+            if let r = HRRecoveryEngine.analyze(hr: hr, workoutEnd: workoutEnd) { return r }
+        }
+        return nil
+    }
+
     /// Raw HR samples binned into per-zone MINUTES for a workout window, using the age-derived
     /// (Tanaka) %HRmax zones , the same display zone model `WorkoutsView` already uses for imported
     /// zone percentages, but computed here from the strap's own samples so a session WITHOUT imported

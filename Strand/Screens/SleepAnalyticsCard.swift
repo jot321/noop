@@ -66,6 +66,11 @@ struct SleepAnalyticsCard: View {
             rows.append(Row(label: "Apnea screen", value: "\(band) (~\(String(format: "%.0f", ahi)))",
                             unit: "AHI", hint: "Screening estimate — not a diagnosis"))
         }
+        // Overnight HR curve (the WHOOP-famous "hammock": an early trough that rises into wake means
+        // the recovery work finished with hours to spare)
+        add("sleep_hr_trough", "Sleep HR trough", unit: "bpm", hint: "Lowest point of the nightly heart-rate curve") { String(format: "%.0f", $0) }
+        add("sleep_hr_trough_frac", "Trough timing", unit: "of night", hint: "Earlier is better — recovery finished sooner") { String(format: "%.0f%%", $0 * 100) }
+        add("nocturnal_dip", "Overnight HR dip", unit: "vs day", hint: "Sleeping HR below daytime; ~10%+ is the healthy pattern") { String(format: "%.0f%%", $0 * 100) }
         // Autonomic HRV
         add("hrv_lfhf", "Autonomic balance", unit: "LF/HF", hint: ">1 sympathetic-leaning, <1 parasympathetic") { String(format: "%.2f", $0) }
         add("hrv_rmssd_deep", "HRV in deep sleep", unit: "ms", hint: "RMSSD during deep-sleep epochs") { String(format: "%.0f", $0) }
@@ -100,7 +105,8 @@ struct SleepAnalyticsCard: View {
         guard !loaded else { return }
         loaded = true
         let keys = ["spo2_min", "odi", "ahi_est", "hrv_lfhf", "hrv_rmssd_deep", "hrv_rmssd_rem",
-                    "temp_amplitude", "temp_nadir_frac", "supine_frac", "restless_frac", "position_changes"]
+                    "temp_amplitude", "temp_nadir_frac", "supine_frac", "restless_frac", "position_changes",
+                    "sleep_hr_trough", "sleep_hr_trough_frac", "nocturnal_dip"]
         var latest: [String: Double] = [:]
         for key in keys {
             let series = await repo.series(key: key, source: source, days: 3)

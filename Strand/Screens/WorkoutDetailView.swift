@@ -52,6 +52,10 @@ struct WorkoutDetailView: View {
     /// row's natural key. nil = no route was recorded (honest — the map only shows when points exist).
     @State private var route: [RouteMath.LatLng] = []
 
+    /// Post-workout heart-rate recovery, computed on demand from the strap's HR tail around the end.
+    /// nil = not measurable (finish wasn't elevated, or the strap stopped streaming) — card hidden.
+    @State private var hrr: HRRecoveryEngine.Result?
+
     var body: some View {
         ScreenScaffold(title: "\(WorkoutSource.displaySport(row.sport))",
                        subtitle: "\(dateLabel(row.startTs))",
@@ -69,6 +73,7 @@ struct WorkoutDetailView: View {
             statStrip
             routeCard
             hrCurveCard
+            hrrCard
             zonesCard
             if let strain = row.strain {
                 effortCard(strain: strain)
@@ -100,6 +105,10 @@ struct WorkoutDetailView: View {
         let buckets = await repo.workoutHrBuckets(from: row.startTs, to: row.endTs)
         let points = buckets.map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }
 
+        // Heart-rate recovery off the strap's post-end HR tail. Nil (card hidden) when the finish
+        // wasn't elevated or nothing streamed after the end — never a fabricated number.
+        let recovery = await repo.heartRateRecovery(workoutEnd: row.endTs)
+
         // Zones: prefer the imported per-workout percentages (a WHOOP-computed split), and only fall
         // back to deriving zone-minutes from the strap's own raw HR when the row has none — so we
         // never overwrite a real imported split with an on-device approximation.
@@ -121,6 +130,7 @@ struct WorkoutDetailView: View {
             self.hrPoints = points
             self.zoneMinutes = minutes
             self.zonesFromImport = fromImport
+            self.hrr = recovery
             self.loaded = true
         }
     }
@@ -245,6 +255,49 @@ struct WorkoutDetailView: View {
     private var routeAccessibilityLabel: String {
         let dist = distanceLabel(row.distanceM)
         return String(localized: "Map of your \(WorkoutSource.displaySport(row.sport)) route, \(dist).")
+    }
+
+    // MARK: - Heart-rate recovery
+
+    /// How fast the heart settled after the session stopped — the 1-minute drop is a classic
+    /// longitudinal fitness marker. Shown ONLY when measurable: an elevated finish AND a strap that
+    /// kept streaming past the end (imported historical sessions without raw HR simply hide it).
+    @ViewBuilder private var hrrCard: some View {
+        if let hrr {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Recovery", overline: "After the session",
+                              trailing: hrrBandLabel(hrr.drop60))
+                NoopCard(tint: StrandPalette.metricRose) {
+                    HStack(spacing: 0) {
+                        routeStat(String(localized: "1-min drop"),
+                                  String(localized: "−\(Int(hrr.drop60.rounded())) bpm"),
+                                  tint: StrandPalette.metricRose)
+                        if let d120 = hrr.drop120 {
+                            routeStat(String(localized: "2-min drop"),
+                                      String(localized: "−\(Int(d120.rounded())) bpm"),
+                                      tint: StrandPalette.metricRose)
+                        }
+                        routeStat(String(localized: "Finished at"),
+                                  String(localized: "\(Int(hrr.endBpm.rounded())) bpm"),
+                                  tint: StrandPalette.textSecondary)
+                    }
+                }
+                Text("How quickly your heart rate fell after you stopped — faster is fitter. Measured from your strap's own stream. Approximate, non-clinical.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// UI wording for the engine's fitness band. Screening language only.
+    private func hrrBandLabel(_ drop60: Double) -> String {
+        switch HRRecoveryEngine.Band.classify(drop60: drop60) {
+        case .excellent: return String(localized: "Excellent")
+        case .good: return String(localized: "Good")
+        case .fair: return String(localized: "Fair")
+        case .low: return String(localized: "Low")
+        }
     }
 
     // MARK: - HR curve

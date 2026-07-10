@@ -394,6 +394,27 @@ Per-second blend of **Keytel (2005)** active expenditure and **revised Harris–
 
 ---
 
+## `HRRecoveryEngine` + `SleepHRCurveEngine` — HR-trajectory analytics
+
+Source: `HRRecoveryEngine.swift`, `SleepHRCurveEngine.swift`. Both run in `IntelligenceEngine`'s
+additive advanced pass and persist to `metricSeries`; both are APPROXIMATE / non-clinical.
+
+- **Post-workout heart-rate recovery** — median bpm straddling the workout end minus the median at
+  +60 s (and +120 s when streamed): the classic 1-minute HRR fitness marker. Gated on an elevated
+  finish (≥100 bpm) so an easy session never prints a fake recovery. Keys: `hrr60`, `hrr120` (the
+  day's LARGEST drop). Live per-session view on the workout detail sheet (`Repository.heartRateRecovery`).
+- **Overnight HR curve** — the HR sibling of `ThermoCurveEngine`: a 24-bin nightly curve with trough
+  bpm/timing (early trough + pre-wake rise = the "hammock" of a finished recovery; a late trough means
+  the body worked through the night), amplitude, and slopes. Keys: `sleep_hr_mean`, `sleep_hr_trough`,
+  `sleep_hr_trough_frac`, `sleep_hr_amplitude`, `sleep_hr_prewake_rise`.
+- **Nocturnal dip** — (daytime mean − sleep mean) / daytime mean, from coarse worn buckets across the
+  16 h before the night; ~10 %+ is the healthy "dipper" pattern and a shrinking dip is an early
+  strain/illness flag. Key: `nocturnal_dip`.
+
+Surfaced on the Sleep screen's "Overnight analytics" card and the workout detail sheet.
+
+---
+
 ## Interactive engines (wired into screens)
 
 These are the **live** data-interrogation engines, used by `InsightsView`, `CompareView`, and `MetricExplorerView`.

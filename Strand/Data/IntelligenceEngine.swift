@@ -961,10 +961,14 @@ final class IntelligenceEngine: ObservableObject {
             async let skinA = store.skinTempSamples(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
             async let gravA = store.gravitySamples(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
             async let rrA = store.rrIntervals(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
+            // Night HR for the curve engine — the COALESCEd measured+PPG read, so a PPG-only 5/MG
+            // night gets a curve too (#156/#172).
+            async let hrA = store.hrSamples(deviceId: owner, from: sleepStart, to: sleepEnd, limit: 200_000)
             let spo2 = (try? await spo2A) ?? []
             let skin = (try? await skinA) ?? []
             let grav = (try? await gravA) ?? []
             let rr = (try? await rrA) ?? []
+            let hrNight = (try? await hrA) ?? []
 
             // Stage windows for this night (union of the sessions' stored hypnograms); asleep spans only,
             // since optical oximetry is corrupted by motion.
@@ -1015,6 +1019,52 @@ final class IntelligenceEngine: ObservableObject {
                 if let lfhf = hrv.nightLFHF { advPoints.append(MetricPoint(day: day, key: "hrv_lfhf", value: lfhf)) }
                 for s in hrv.byStage where s.rmssd != nil {
                     advPoints.append(MetricPoint(day: day, key: "hrv_rmssd_\(s.stage)", value: s.rmssd!))
+                }
+            }
+
+            // 5) Overnight HR curve shape + nocturnal dip (the HR sibling of the thermo curve).
+            if let curve = SleepHRCurveEngine.analyze(hr: hrNight, sleepStart: sleepStart, sleepEnd: sleepEnd) {
+                advPoints.append(MetricPoint(day: day, key: "sleep_hr_mean", value: curve.meanBpm))
+                advPoints.append(MetricPoint(day: day, key: "sleep_hr_trough", value: curve.troughBpm))
+                advPoints.append(MetricPoint(day: day, key: "sleep_hr_trough_frac", value: curve.troughFraction))
+                advPoints.append(MetricPoint(day: day, key: "sleep_hr_amplitude", value: curve.amplitudeBpm))
+                advPoints.append(MetricPoint(day: day, key: "sleep_hr_prewake_rise", value: curve.preWakeRiseBpmPerHour))
+                // Nocturnal dip needs the day side too: mean of coarse worn buckets across the 16 h
+                // leading into the night (buckets only exist where samples do, so an off-wrist
+                // afternoon self-excludes). ≥8 quarter-hour buckets ≈ 2 worn hours or nothing prints.
+                let dayBuckets = (try? await store.hrBuckets(deviceId: owner, from: sleepStart - 16 * 3600,
+                                                             to: sleepStart - 3600, bucketSeconds: 900)) ?? []
+                if dayBuckets.count >= 8 {
+                    let dayMean = dayBuckets.map(\.bpm).reduce(0, +) / Double(dayBuckets.count)
+                    if let dip = SleepHRCurveEngine.nocturnalDip(daytimeMeanBpm: dayMean,
+                                                                 sleepMeanBpm: curve.meanBpm) {
+                        advPoints.append(MetricPoint(day: day, key: "nocturnal_dip", value: dip))
+                    }
+                }
+            }
+
+            // 6) Post-workout heart-rate recovery. The workouts of THIS day follow the night just
+            // scored, so scan [wake, wake+18h] — real + Apple Health rows, the same two sources the
+            // pass-1 auto-workout dedup consults. Raw HR around each end comes from the night's
+            // resolved owner (the strap that streamed that day). The day's headline is the LARGEST
+            // 1-minute drop (current capacity); a stretch session that never elevated HR yields nil
+            // from the engine and simply doesn't compete.
+            var dayWorkouts = (try? await store.workouts(deviceId: deviceId, from: sleepEnd,
+                                                         to: sleepEnd + 18 * 3600, limit: 200)) ?? []
+            dayWorkouts += (try? await store.workouts(deviceId: "apple-health", from: sleepEnd,
+                                                      to: sleepEnd + 18 * 3600, limit: 200)) ?? []
+            var hrrResults: [HRRecoveryEngine.Result] = []
+            for w in dayWorkouts where w.endTs > w.startTs && (w.endTs - w.startTs) >= 8 * 60 {
+                let hrTail = (try? await store.hrSamples(deviceId: owner, from: w.endTs - 30,
+                                                         to: w.endTs + 135, limit: 500)) ?? []
+                if let r = HRRecoveryEngine.analyze(hr: hrTail, workoutEnd: w.endTs) {
+                    hrrResults.append(r)
+                }
+            }
+            if let best = HRRecoveryEngine.bestOfDay(hrrResults) {
+                advPoints.append(MetricPoint(day: day, key: "hrr60", value: best.drop60))
+                if let d120 = best.drop120 {
+                    advPoints.append(MetricPoint(day: day, key: "hrr120", value: d120))
                 }
             }
         }
