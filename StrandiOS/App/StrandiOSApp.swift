@@ -162,7 +162,10 @@ struct StrandiOSApp: App {
                     // watch only ever holds placeholder data on a real device.
                     await watch.pushLatest(from: model)
                 }
+            } else if phase == .inactive {
+                model.flushPerformanceState()
             } else if phase == .background {
+                model.flushPerformanceState()
                 // #155: refresh the Documents/noop_sync.txt drop file the user's Siri Shortcut logs
                 // into Apple Health. Gated inside writeIfEnabled on the opt-in default (OFF) — a
                 // no-op until the user turns on Shortcuts Export.

@@ -8,6 +8,29 @@ import WhoopProtocol
 /// Pure + `UserDefaults`-backed, mirroring the Android `ActiveWorkoutPersistenceTest` case for case.
 final class ActiveWorkoutPersistenceTests: XCTestCase {
 
+    private final class LockedEvents {
+        private let lock = NSLock()
+        private var events: [ActiveWorkoutPersistenceCoordinator.WriteEvent] = []
+
+        func append(_ event: ActiveWorkoutPersistenceCoordinator.WriteEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        func removeAll() {
+            lock.lock()
+            events.removeAll()
+            lock.unlock()
+        }
+
+        var snapshot: [ActiveWorkoutPersistenceCoordinator.WriteEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return events
+        }
+    }
+
     private func sample(_ ts: Int, _ bpm: Int) -> HRSample { HRSample(ts: ts, bpm: bpm) }
 
     private func snapshot(
@@ -117,5 +140,127 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         XCTAssertEqual(decoded!.avgHr, 0)
         XCTAssertEqual(decoded!.peakHr, 0)
         XCTAssertEqual(decoded!.liveStrain, 0, accuracy: 1e-9)
+    }
+
+    // MARK: - coalesced coordinator
+
+    private func testQueue(_ name: String = UUID().uuidString) -> DispatchQueue {
+        DispatchQueue(label: "test.activeWorkoutPersistence.\(name)", qos: .userInteractive)
+    }
+
+    func testCoordinatorStartPersistsImmediatelyOffMainThread() {
+        let defaults = freshDefaults()
+        let events = LockedEvents()
+        let coordinator = ActiveWorkoutPersistenceCoordinator(
+            defaults: defaults,
+            snapshotInterval: 0.05,
+            queue: testQueue(),
+            writeObserver: { events.append($0) })
+
+        coordinator.start(snapshot())
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults), snapshot())
+        XCTAssertEqual(events.snapshot.count, 1)
+        if case let .store(_, isMainThread) = events.snapshot[0] {
+            XCTAssertFalse(isMainThread)
+        } else {
+            XCTFail("Expected an immediate store event")
+        }
+    }
+
+    func testCoordinatorCoalescesRepeatedUpdatesToOneTrailingWrite() {
+        let defaults = freshDefaults()
+        let events = LockedEvents()
+        let coordinator = ActiveWorkoutPersistenceCoordinator(
+            defaults: defaults,
+            snapshotInterval: 0.05,
+            queue: testQueue(),
+            writeObserver: { events.append($0) })
+        coordinator.start(snapshot())
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+        events.removeAll()
+
+        let firstUpdate = snapshot(samples: [sample(1_700_000_001, 120)], avgHr: 120, peakHr: 120)
+        let newestUpdate = snapshot(
+            samples: [sample(1_700_000_001, 120), sample(1_700_000_002, 140)],
+            avgHr: 130,
+            peakHr: 140,
+            liveStrain: 3.2)
+        coordinator.update(firstUpdate)
+        coordinator.update(newestUpdate)
+
+        Thread.sleep(forTimeInterval: 0.02)
+        XCTAssertTrue(events.snapshot.isEmpty)
+        XCTAssertTrue(waitUntil(timeout: 1) { events.snapshot.count == 1 })
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults), newestUpdate)
+        if case let .store(stored, _) = events.snapshot[0] {
+            XCTAssertEqual(stored, newestUpdate)
+        } else {
+            XCTFail("Expected the trailing event to store the newest snapshot")
+        }
+    }
+
+    func testCoordinatorFlushPersistsNewestSnapshotNowAndInvalidatesTrailingWrite() {
+        let defaults = freshDefaults()
+        let events = LockedEvents()
+        let coordinator = ActiveWorkoutPersistenceCoordinator(
+            defaults: defaults,
+            snapshotInterval: 0.2,
+            queue: testQueue(),
+            writeObserver: { events.append($0) })
+        coordinator.start(snapshot())
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+        events.removeAll()
+
+        let latest = snapshot(samples: [sample(1_700_000_001, 121)], avgHr: 121, peakHr: 121)
+        coordinator.update(latest)
+        coordinator.flush()
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults), latest)
+        XCTAssertEqual(events.snapshot.count, 1)
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+        XCTAssertEqual(events.snapshot.count, 1)
+    }
+
+    func testCoordinatorFinishClearsAfterQueuedWritesAndDelayedWorkCannotResurrect() {
+        let defaults = freshDefaults()
+        let events = LockedEvents()
+        let coordinator = ActiveWorkoutPersistenceCoordinator(
+            defaults: defaults,
+            snapshotInterval: 0.05,
+            queue: testQueue(),
+            writeObserver: { events.append($0) })
+        coordinator.start(snapshot())
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+
+        let late = snapshot(samples: [sample(1_700_000_001, 122)], avgHr: 122, peakHr: 122)
+        coordinator.update(late)
+        coordinator.finishAndClear()
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertTrue(coordinator.waitForIdle(timeout: 1))
+
+        XCTAssertNil(ActiveWorkoutPersistence.load(from: defaults))
+        XCTAssertEqual(events.snapshot.last, .clear(isMainThread: false))
+        let clearIndex = events.snapshot.lastIndex(of: .clear(isMainThread: false))
+        let laterStores = events.snapshot.enumerated().filter { index, event in
+            guard let clearIndex, index > clearIndex else { return false }
+            if case .store = event { return true }
+            return false
+        }
+        XCTAssertTrue(laterStores.isEmpty)
+    }
+
+    private func waitUntil(timeout: TimeInterval, _ condition: @escaping () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        return condition()
     }
 }

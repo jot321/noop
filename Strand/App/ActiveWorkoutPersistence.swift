@@ -73,3 +73,141 @@ enum ActiveWorkoutPersistence {
         defaults.removeObject(forKey: defaultsKey)
     }
 }
+
+final class ActiveWorkoutPersistenceCoordinator {
+    enum WriteEvent: Equatable {
+        case store(ActiveWorkoutPersistence.Snapshot, isMainThread: Bool)
+        case clear(isMainThread: Bool)
+    }
+
+    static let productionSnapshotInterval: TimeInterval = 15
+
+    private let defaults: UserDefaults
+    private let snapshotInterval: TimeInterval
+    private let queue: DispatchQueue
+    private let writeObserver: ((WriteEvent) -> Void)?
+    private let specificKey = DispatchSpecificKey<Void>()
+
+    private var generation: UInt64 = 0
+    private var trailingID: UInt64 = 0
+    private var scheduledTrailingID: UInt64?
+    private var active = false
+    private var dirty = false
+    private var latest: ActiveWorkoutPersistence.Snapshot?
+
+    init(
+        defaults: UserDefaults = .standard,
+        snapshotInterval: TimeInterval = productionSnapshotInterval,
+        queue: DispatchQueue = DispatchQueue(label: "noop.activeWorkout.persistence", qos: .utility),
+        writeObserver: ((WriteEvent) -> Void)? = nil
+    ) {
+        self.defaults = defaults
+        self.snapshotInterval = snapshotInterval
+        self.queue = queue
+        self.writeObserver = writeObserver
+        queue.setSpecific(key: specificKey, value: ())
+    }
+
+    func start(_ snapshot: ActiveWorkoutPersistence.Snapshot) {
+        queue.async { [self] in
+            generation &+= 1
+            active = true
+            dirty = false
+            latest = snapshot
+            invalidateTrailing()
+            store(snapshot, generation: generation)
+        }
+    }
+
+    func update(_ snapshot: ActiveWorkoutPersistence.Snapshot) {
+        queue.async { [self] in
+            guard active else { return }
+            latest = snapshot
+            dirty = true
+            scheduleTrailingIfNeeded()
+        }
+    }
+
+    func flush(_ snapshot: ActiveWorkoutPersistence.Snapshot? = nil) {
+        syncOnQueue {
+            guard self.active else { return }
+            if let snapshot {
+                self.latest = snapshot
+                self.dirty = true
+            }
+            guard self.dirty, let latest = self.latest else {
+                self.invalidateTrailing()
+                return
+            }
+            self.dirty = false
+            self.invalidateTrailing()
+            self.store(latest, generation: self.generation)
+        }
+    }
+
+    func finishAndClear() {
+        syncOnQueue {
+            self.generation &+= 1
+            self.active = false
+            self.dirty = false
+            self.latest = nil
+            self.invalidateTrailing()
+            self.defaults.removeObject(forKey: ActiveWorkoutPersistence.defaultsKey)
+            self.writeObserver?(.clear(isMainThread: Thread.isMainThread))
+        }
+    }
+
+    @discardableResult
+    func waitForIdle(timeout: TimeInterval = 1) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        queue.async {
+            semaphore.signal()
+        }
+        return semaphore.wait(timeout: .now() + timeout) == .success
+    }
+
+    private func scheduleTrailingIfNeeded() {
+        guard scheduledTrailingID == nil else { return }
+        trailingID &+= 1
+        let id = trailingID
+        let snapshotGeneration = generation
+        scheduledTrailingID = id
+        queue.asyncAfter(deadline: .now() + snapshotInterval) { [weak self] in
+            self?.runTrailing(id: id, generation: snapshotGeneration)
+        }
+    }
+
+    private func runTrailing(id: UInt64, generation snapshotGeneration: UInt64) {
+        guard active, generation == snapshotGeneration, scheduledTrailingID == id else { return }
+        scheduledTrailingID = nil
+        guard dirty, let latest else { return }
+        dirty = false
+        store(latest, generation: snapshotGeneration)
+    }
+
+    private func invalidateTrailing() {
+        trailingID &+= 1
+        scheduledTrailingID = nil
+    }
+
+    private func store(_ snapshot: ActiveWorkoutPersistence.Snapshot, generation snapshotGeneration: UInt64) {
+        guard active, generation == snapshotGeneration,
+              let data = ActiveWorkoutPersistence.encode(snapshot) else { return }
+        defaults.set(data, forKey: ActiveWorkoutPersistence.defaultsKey)
+        writeObserver?(.store(snapshot, isMainThread: Thread.isMainThread))
+    }
+
+    private func syncOnQueue<T>(_ work: @escaping () -> T) -> T {
+        if DispatchQueue.getSpecific(key: specificKey) != nil {
+            return work()
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: T?
+        queue.async {
+            result = work()
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return result!
+    }
+}

@@ -489,7 +489,7 @@ public final class LiveState: ObservableObject {
             visibleLog.removeFirst(visibleLog.count - Self.maxVisibleLogLines)
         }
         newestVisibleLogID = visibleLine.id
-        Self.persistTail(log)
+        Self.persistedTailWriter.append(redacted)
         // #990: fold the Backfiller's per-session "session persisted N rows" summary into the persisted
         // ALL-TIME drained-rows tally, right here at the single log sink (no new BLE seam). The summary
         // is emitted unconditionally whenever rows landed (#150), so the cumulative counter accrues on
@@ -516,24 +516,28 @@ public final class LiveState: ObservableObject {
     /// scheduled export can read the last day's lines even with no live BLE session open. Small and
     /// bounded: capped to the tail (`tailLimit`, well under `maxLogLines`) of short redacted strings, so
     /// the persisted blob stays a few hundred KB at most. On-device only; nothing is sent anywhere.
-    private static let tailKey = "strapLog.tail"
+    nonisolated private static let tailKey = "strapLog.tail"
     /// How many recent lines the durable tail retains — a sensible day's worth for a scheduled export,
     /// smaller than the live `maxLogLines` ring so the persisted copy stays modest.
-    static let tailLimit = 2_000
+    nonisolated static let tailLimit = 2_000
+    nonisolated(unsafe) private static let persistedTailWriter = LogTailPersistence(
+        key: tailKey,
+        limit: tailLimit)
 
-    /// Mirror the most recent `tailLimit` lines to UserDefaults (called from `append`). Synchronous and
-    /// cheap (a single small array write); UserDefaults coalesces the disk flush. `nonisolated` (touches
-    /// only UserDefaults, no actor state) so the background/static export path can read the twin getter.
-    nonisolated private static func persistTail(_ lines: [String]) {
-        let tail = lines.count > tailLimit ? Array(lines.suffix(tailLimit)) : lines
-        UserDefaults.standard.set(tail, forKey: tailKey)
+    /// Force any pending durable-tail write before lifecycle boundaries or exports.
+    nonisolated public static func flushPersistedLogTail() {
+        persistedTailWriter.flush()
+    }
+
+    public func flushPersistedLogTail() {
+        Self.flushPersistedLogTail()
     }
 
     /// The persisted log tail, newest-last — what a scheduled export reads when no live session is open.
     /// Empty if nothing has ever been logged on this device. `nonisolated` so a background task with no
     /// main-actor instance can read it.
     nonisolated public static func persistedLogTail() -> [String] {
-        (UserDefaults.standard.array(forKey: tailKey) as? [String]) ?? []
+        persistedTailWriter.persistedTail()
     }
 
     /// A shareable strap-log body sourced from the DURABLE tail, for a background / scheduled export that

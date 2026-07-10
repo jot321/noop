@@ -17,6 +17,7 @@ struct StrandApp: App {
     /// Shared cross-screen navigation hook (e.g. Live → Devices). The macOS shell (`RootView`)
     /// observes it and drives the sidebar selection.
     @StateObject private var router = NavRouter()
+    @Environment(\.scenePhase) private var scenePhase
     /// Appearance preference (System/Light/Dark). Default follows the OS; the Settings picker writes it.
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
     /// Chart data-colour style (Titanium / Classic throwback). Re-colours gauges + charts.
@@ -44,6 +45,11 @@ struct StrandApp: App {
                 // fixed-geometry tiles/gauges stay legible at the largest accessibility sizes rather than
                 // clipping; the common Larger-Text range still scales fully.
                 .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                .onChangeCompat(of: scenePhase) { phase in
+                    if phase == .background || phase == .inactive {
+                        model.flushPerformanceState()
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 820)

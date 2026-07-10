@@ -95,16 +95,16 @@ enum BiofeedbackPrefs {
 
     // MARK: - L3 replay-safe state
 
-    static func loadStressState() -> StressOnsetDetector.State {
+    static func loadStressState(from defaults: UserDefaults = d) -> StressOnsetDetector.State {
         StressOnsetDetector.State(
-            baselineRMSSD: d.double(forKey: K.stBaseline),
-            wasBelow: d.bool(forKey: K.stWasBelow),
-            lastFireAt: d.integer(forKey: K.stLastFire))
+            baselineRMSSD: defaults.double(forKey: K.stBaseline),
+            wasBelow: defaults.bool(forKey: K.stWasBelow),
+            lastFireAt: defaults.integer(forKey: K.stLastFire))
     }
 
-    static func saveStressState(_ s: StressOnsetDetector.State) {
-        d.set(s.baselineRMSSD, forKey: K.stBaseline)
-        d.set(s.wasBelow, forKey: K.stWasBelow)
-        d.set(s.lastFireAt, forKey: K.stLastFire)
+    static func saveStressState(_ s: StressOnsetDetector.State, into defaults: UserDefaults = d) {
+        defaults.set(s.baselineRMSSD, forKey: K.stBaseline)
+        defaults.set(s.wasBelow, forKey: K.stWasBelow)
+        defaults.set(s.lastFireAt, forKey: K.stLastFire)
     }
 }

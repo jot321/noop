@@ -164,6 +164,7 @@ enum ScheduledDebugExport {
         let stamp = FileExport.timestamp()
         let logURL = docs.appendingPathComponent("noop-strap-log-\(stamp).txt")
         do {
+            LiveState.flushPersistedLogTail()
             try LiveState.scheduledExportText().write(to: logURL, atomically: true, encoding: .utf8)
         } catch {
             return nil

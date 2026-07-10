@@ -5,7 +5,10 @@ import WhoopStore
 import StrandAnalytics
 import StrandImport
 #if os(iOS)
+import UIKit
 import UserNotifications
+#elseif os(macOS)
+import AppKit
 #endif
 
 /// Data source currently running an import from the Data Sources screen.
@@ -100,6 +103,8 @@ final class AppModel: ObservableObject {
     /// True while the active workout is a GPS-type session (drives the End-time route persist). Mirrors
     /// Android's `ActiveWorkout.gpsEnabled`.
     private var activeWorkoutIsGps = false
+    private var activeWorkoutRuntime = ActiveWorkoutRuntime()
+    private let activeWorkoutPersistence = ActiveWorkoutPersistenceCoordinator()
 
     /// A manual workout in progress. `samples` accumulate from the smoothed live `bpm`; `liveStrain`
     /// is recomputed as the window grows so the active card can show strain building in real time.
@@ -147,6 +152,7 @@ final class AppModel: ObservableObject {
     // via BiofeedbackPrefs so a relaunch can't re-fire), carried verbatim between evaluations.
     private var rrBuf: [Int] = []
     private var stressState = BiofeedbackPrefs.loadStressState()
+    private let stressStatePersistence = StressStatePersistence()
     // Legacy experimental stress-nudge state (the older `behavior.stressNudge` buzz path) , a slow HRV
     // baseline + a rate limiter, kept so that toggle still works independently of the L3 check-in.
     private var hrvBaseline: Double = 0
@@ -189,6 +195,7 @@ final class AppModel: ObservableObject {
     @Published var bpm: Int?
     private var hrWindow: [(t: Date, v: Double)] = []
     private var hrCancellables = Set<AnyCancellable>()
+    private var lifecycleFlushObservers: [NSObjectProtocol] = []
     /// Drives the READ spine off the registry's active device (#814 HIGH-1). A Devices-screen
     /// switch/remove/re-add calls `registry.setActive` DIRECTLY (not through `registerDevice`), so without
     /// this subscription the reads stayed pinned to whatever id was active at wiring time for the whole
@@ -234,8 +241,17 @@ final class AppModel: ObservableObject {
             }
         }.store(in: &hrCancellables)
         // Smooth HR centrally so it's solid everywhere it's shown.
-        live.$heartRate.sink { [weak self] _ in self?.ingestHR() }.store(in: &hrCancellables)
-        live.$rr.sink { [weak self] _ in self?.ingestHR() }.store(in: &hrCancellables)
+        live.$heartRate.dropFirst().sink { [weak self] hr in
+            self?.ingestHeartRate(hr)
+        }.store(in: &hrCancellables)
+        live.$rr.dropFirst().sink { [weak self] packet in
+            self?.ingestRR(packet)
+        }.store(in: &hrCancellables)
+        live.$connected.dropFirst().removeDuplicates().sink { [weak self] connected in
+            guard let self, !connected else { return }
+            self.flushPerformanceState()
+        }.store(in: &hrCancellables)
+        installPerformanceFlushObservers()
 
         // Physical-input + wear hooks (fired live by FrameRouter).
         live.onDoubleTap = { [weak self] in self?.handleDoubleTap() }
@@ -490,11 +506,24 @@ final class AppModel: ObservableObject {
     /// Fold a fresh reading into the smoothing window and republish a stable bpm.
     /// Prefers the strap's reported HR; falls back to 60000/R-R. Clamps to a plausible
     /// 30–220 range (rejects 0 / garbage spikes) and publishes the window MEDIAN.
-    private func ingestHR() {
+    private func ingestHeartRate(_ hr: Int?) {
+        ingestHR(heartRate: hr, rrPacket: nil)
+    }
+
+    private func ingestRR(_ packet: [Int]) {
+        guard !packet.isEmpty else {
+            if live.heartRate == nil { resetSmoothing() }
+            return
+        }
+        ingestHR(heartRate: live.heartRate, rrPacket: packet)
+        evaluateStress(rrPacket: packet)
+    }
+
+    private func ingestHR(heartRate: Int?, rrPacket: [Int]?) {
         var inst: Double?
-        if let hr = live.heartRate, hr >= 30, hr <= 220 {
+        if let hr = heartRate, hr >= 30, hr <= 220 {
             inst = Double(hr)
-        } else if let rr = live.rr.last, rr > 0 {
+        } else if let rr = rrPacket?.last, rr > 0 {
             let v = 60_000.0 / Double(rr)
             if v >= 30, v <= 220 { inst = v }
         }
@@ -503,7 +532,7 @@ final class AppModel: ObservableObject {
             // median so screens that now prefer `bpm` fall through to "," instead of freezing on the
             // last value. Mirrors Android (_bpm = null on disconnect). A transient out-of-range sample
             // with the link still up (heartRate or rr still present) keeps the last median.
-            if live.heartRate == nil && live.rr.isEmpty { resetSmoothing() }
+            if heartRate == nil && (rrPacket?.isEmpty ?? live.rr.isEmpty) { resetSmoothing() }
             return
         }
         let now = Date()
@@ -517,7 +546,6 @@ final class AppModel: ObservableObject {
         let smoothed = vals.isEmpty ? nil : Int(vals[vals.count / 2].rounded())
         if bpm != smoothed { bpm = smoothed }
         captureWorkoutSample()
-        evaluateStress()
     }
 
     // MARK: - Manual workout tracking
@@ -533,6 +561,7 @@ final class AppModel: ObservableObject {
         let resolved = name.isEmpty ? WorkoutCatalog.defaultSportName : name
         let started = Date()
         activeWorkout = ActiveWorkout(start: started, sport: resolved)
+        activeWorkoutRuntime = ActiveWorkoutRuntime()
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -544,7 +573,9 @@ final class AppModel: ObservableObject {
         }
         // Make the session durable from the first instant (#529): persist it now so an OS kill right
         // after Start , before any HR sample lands , can still be rehydrated + ended on relaunch.
-        persistActiveWorkout()
+        if let activeWorkout {
+            activeWorkoutPersistence.start(activeWorkoutSnapshot(activeWorkout))
+        }
         // Workouts & GPS test mode (Test Centre): one session-start line tagged `.workouts`. Zero-cost when
         // off (the gate is one UserDefaults bool read), so the lifecycle of a missing workout is visible.
         emitWorkoutsTrace(WorkoutsTrace.sessionLine(
@@ -591,16 +622,55 @@ final class AppModel: ObservableObject {
     /// session (#529). Called on start + each captured sample. A no-op when nothing is running. Apple has
     /// no GPS-route session, so every manual workout is the "non-GPS" case and gets this durability ,
     /// the Apple analogue of Android's `persistNonGpsWorkout`.
+    private func activeWorkoutSnapshot(_ w: ActiveWorkout) -> ActiveWorkoutPersistence.Snapshot {
+        ActiveWorkoutPersistence.Snapshot(
+            startSec: Int(w.start.timeIntervalSince1970),
+            sport: w.sport,
+            samples: w.samples,
+            avgHr: w.avgHr,
+            peakHr: w.peakHr,
+            liveStrain: w.liveStrain)
+    }
+
     private func persistActiveWorkout() {
         guard let w = activeWorkout else { return }
-        ActiveWorkoutPersistence.store(
-            ActiveWorkoutPersistence.Snapshot(
-                startSec: Int(w.start.timeIntervalSince1970),
-                sport: w.sport,
-                samples: w.samples,
-                avgHr: w.avgHr,
-                peakHr: w.peakHr,
-                liveStrain: w.liveStrain))
+        activeWorkoutPersistence.update(activeWorkoutSnapshot(w))
+    }
+
+    private func flushActiveWorkoutPersistence() {
+        guard let w = activeWorkout else {
+            activeWorkoutPersistence.flush()
+            return
+        }
+        activeWorkoutPersistence.flush(activeWorkoutSnapshot(w))
+    }
+
+    func flushPerformanceState() {
+        flushActiveWorkoutPersistence()
+        live.flushPersistedLogTail()
+        stressStatePersistence.flush()
+    }
+
+    private func installPerformanceFlushObservers() {
+        #if os(iOS)
+        let names: [Notification.Name] = [
+            UIApplication.willResignActiveNotification,
+            UIApplication.didEnterBackgroundNotification,
+            UIApplication.willTerminateNotification
+        ]
+        #elseif os(macOS)
+        let names: [Notification.Name] = [
+            NSApplication.willResignActiveNotification,
+            NSApplication.willTerminateNotification
+        ]
+        #else
+        let names: [Notification.Name] = []
+        #endif
+        lifecycleFlushObservers = names.map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.flushPerformanceState() }
+            }
+        }
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -616,6 +686,8 @@ final class AppModel: ObservableObject {
         w.peakHr = snap.peakHr
         w.liveStrain = snap.liveStrain
         activeWorkout = w
+        activeWorkoutRuntime = ActiveWorkoutRuntime(restoredSamples: snap.samples)
+        activeWorkoutPersistence.start(activeWorkoutSnapshot(w))
     }
 
     /// Finish the active workout: finalize the GPS route (#524), score the captured HR window, and save it
@@ -624,11 +696,12 @@ final class AppModel: ObservableObject {
     func endWorkout() {
         guard let w = activeWorkout else { return }
         activeWorkout = nil
+        activeWorkoutRuntime = ActiveWorkoutRuntime()
         let wasGps = activeWorkoutIsGps
         activeWorkoutIsGps = false
         // Drop the durable snapshot the instant the session ends , whether it saves below or is discarded
         // as too-short , so a relaunch never rehydrates an already-finished session (#529).
-        ActiveWorkoutPersistence.clear()
+        activeWorkoutPersistence.finishAndClear()
         // #524: finalize the GPS route. Stop the recorder and take its captured route , it kept
         // accumulating from CoreLocation independently of the HR window. `capturedRoute()` is nil unless
         // ≥2 points actually landed (honest: no route, no distance, when nothing was captured , e.g. a
@@ -698,10 +771,14 @@ final class AppModel: ObservableObject {
     /// over the growing window each sample is cheap at the ~1 Hz live-HR cadence.
     private func captureWorkoutSample() {
         guard var w = activeWorkout, let hr = bpm else { return }
-        w.samples.append(HRSample(ts: Int(Date().timeIntervalSince1970), bpm: hr))
-        w.peakHr = max(w.peakHr, hr)
-        w.avgHr = Int((Double(w.samples.map(\.bpm).reduce(0, +)) / Double(w.samples.count)).rounded())
-        w.liveStrain = StrainScorer.strain(w.samples, maxHR: Double(profile.hrMax), sex: profile.sex) ?? 0
+        let sample = HRSample(ts: Int(Date().timeIntervalSince1970), bpm: hr)
+        guard let accepted = activeWorkoutRuntime.accept(sample) else { return }
+        w.samples.append(accepted.sample)
+        w.peakHr = activeWorkoutRuntime.peakBpm
+        w.avgHr = activeWorkoutRuntime.roundedAverageBpm
+        if accepted.requestsStrain {
+            w.liveStrain = StrainScorer.strain(w.samples, maxHR: Double(profile.hrMax), sex: profile.sex) ?? 0
+        }
         activeWorkout = w
         // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
         persistActiveWorkout()
@@ -726,8 +803,8 @@ final class AppModel: ObservableObject {
     ///     state (de-dup + slow baseline + rate limit), persisted via `BiofeedbackPrefs` so a relaunch
     ///     can't re-fire. Honest / non-clinical: "stress" is an autonomic proxy vs the user's own
     ///     baseline, never a diagnosis.
-    private func evaluateStress() {
-        let fresh = live.rr.filter { $0 > 300 && $0 < 2000 }   // plausible R-R (30–200 bpm)
+    private func evaluateStress(rrPacket: [Int]) {
+        let fresh = rrPacket.filter { $0 > 300 && $0 < 2000 }   // plausible R-R (30–200 bpm)
         guard !fresh.isEmpty else { return }
         rrBuf.append(contentsOf: fresh)
         if rrBuf.count > 120 { rrBuf.removeFirst(rrBuf.count - 120) }
@@ -761,8 +838,12 @@ final class AppModel: ObservableObject {
             config: cfg,
             nowSec: Int(Date().timeIntervalSince1970),
             tzOffsetSec: TimeZone.current.secondsFromGMT())
+        let previousState = stressState
         stressState = decision.nextState
-        BiofeedbackPrefs.saveStressState(decision.nextState)
+        stressStatePersistence.persist(
+            previous: previousState,
+            next: decision.nextState,
+            enabled: cfg.enabled && cfg.autoNudge)
         guard decision.shouldNudge else { return }
         if canBuzz { buzz(loops: UInt8(clamping: decision.buzzLoops)) }
         stressNudgeCenter.present(fastRMSSD: decision.fastRMSSD, baselineRMSSD: decision.baselineRMSSD)
@@ -789,7 +870,10 @@ final class AppModel: ObservableObject {
             ?? .whoop4
         ble.connect(model: chosen)
     }
-    func disconnect() { ble.disconnect() }
+    func disconnect() {
+        flushPerformanceState()
+        ble.disconnect()
+    }
 
     /// Drop the current strap and clear bond state so a newly-picked strap model connects fresh
     /// (lets a user with both a WHOOP 4 and a 5/MG switch between them).
