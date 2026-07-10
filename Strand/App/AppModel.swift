@@ -299,10 +299,10 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
             guard let self, !connected else { return }
             self.flushPerformanceState()
         }.store(in: &hrCancellables)
-        live.onDisconnectFinalized = { [weak self] in
-            // A removal/model-switch can publish `connected = false` before CoreBluetooth's final
-            // callback. Flush again after its tail diagnostics even when Combine suppresses that edge.
-            self?.flushPerformanceState()
+        live.onDisconnectFinalized = {
+            // A removal/model-switch already flushed workout/stress state when it published false.
+            // Only the diagnostics appended later in CoreBluetooth's callback still need durability.
+            LiveState.flushPersistedLogTail()
         }
         Publishers.CombineLatest(behavior.$stressCheckIn, behavior.$stressAutoNudge)
             .map { StressStatePersistence.isEnabled(checkIn: $0, autoNudge: $1) }
