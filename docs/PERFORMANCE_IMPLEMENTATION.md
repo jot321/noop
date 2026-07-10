@@ -14,7 +14,11 @@ This document records the implemented U1-U5/P1-P4 behavior from
 [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md), the verification evidence,
 and rollback guidance for the integrated branch.
 
-## Commit List
+## Recorded Milestones and Authoritative Inventory
+
+The milestones below record the implementation sequence through the initial
+Task 5 verification documentation. This is intentionally not a complete,
+self-referential inventory of `HEAD`:
 
 - `33428f1` - Document high-impact performance design
 - `ebe8d00` - Document high-impact performance implementation plan
@@ -28,8 +32,15 @@ and rollback guidance for the integrated branch.
 - `700bcbb` - Throttle passive Live Activity updates
 - `1fc2c47` - Fix Live Activity end race and preference updates
 - `0444aa5` - Prevent Live Activity ended-handle re-adoption
+- `cb70fce` - Document performance changes and verification
 
-Task 5 adds this documentation and the corrected analysis report only.
+Later documentation-only corrections, including corrections to this section,
+are intentionally discovered from Git rather than hard-coded into the document.
+The authoritative inventory of every current branch commit after the baseline is:
+
+```bash
+git log performance-baseline-2026-07-10..HEAD
+```
 
 ## Subsystem Behavior
 
@@ -112,7 +123,10 @@ wanted start or stop.
 - start immediately when enabled, connected, and a valid HR is available;
 - active Live/workout/session experience minimum interval: two seconds;
 - passive connected wear minimum interval: 30 seconds;
-- disconnect or opt-out: end immediately, bypassing cadence throttles.
+- disconnect: end immediately, bypassing cadence throttles; the disconnect path
+  separately tears down the BLE connection and live biometric streams;
+- Live Activity opt-out: end only the Live Activity immediately. BLE connection,
+  standard HR/R-R, and realtime owner policy remain unchanged.
 
 `LiveActivityController` gates expensive score lookup behind policy decisions,
 caches `ActivityAuthorizationInfo`, avoids concurrent duplicate starts, and
@@ -142,7 +156,8 @@ paths, termination observers, and scheduled debug export preparation.
 | Active workout | Kept | Kept | Armed | Armed | Active, 2-second floor |
 | Live session runner | Kept | Kept | Armed | Armed | Active, 2-second floor |
 | Passive continuous HRV only | Kept | Kept | Not armed | Toggle only | Passive, 30-second floor |
-| Disconnect or opt-out | Dropped/ending | Dropped | Dropped | Dropped | Immediate end |
+| BLE disconnect | Dropped | Dropped | Dropped | Dropped | Immediate end |
+| Live Activity opt-out | Unchanged | Unchanged | Unchanged; follows realtime owners | Unchanged; follows realtime owners/passive policy | Immediate end only |
 
 ## Verification Evidence
 
@@ -271,14 +286,47 @@ Pending real-device checks:
 
 ## Rollback Guidance
 
-Full branch rollback to the baseline:
+Do not discard local work to inspect or roll back this branch. First inspect the
+baseline in a separate worktree, using an unused destination path:
 
 ```bash
-git reset --hard performance-baseline-2026-07-10
+git status --short
+git worktree add --detach ../noop-performance-baseline-inspection performance-baseline-2026-07-10
 ```
 
-Do not use that on a shared branch without coordination. For revert-based
-rollback, revert dependent commits newest-first.
+The added worktree is a non-destructive baseline checkout; it does not move or
+rewrite the performance branch. Before any revert, require a clean status and
+create a backup ref. Commit, stash, or otherwise back up any local work before
+continuing; none of the commands below should be used to discard it.
+
+```bash
+test -z "$(git status --porcelain)" || {
+  echo "Stop: back up local work and restore a clean worktree before rollback."
+  exit 1
+}
+backup_branch="backup/performance-before-rollback-$(date +%Y%m%d-%H%M%S)"
+git branch "$backup_branch"
+```
+
+For a full branch rollback, create a separate rollback branch and revert every
+commit currently after the baseline. `git rev-list` supplies the complete
+newest-first sequence at execution time, so it includes `cb70fce` and all later
+documentation corrections without requiring this document to name its own
+commit:
+
+```bash
+rollback_branch="rollback/performance-to-baseline-$(date +%Y%m%d-%H%M%S)"
+git switch -c "$rollback_branch"
+git revert --no-edit $(git rev-list performance-baseline-2026-07-10..HEAD)
+```
+
+If a revert conflicts, stop and inspect it. Use `git revert --continue` only
+after a deliberate resolution, or `git revert --abort` to abandon the active
+sequence. The backup ref and separate rollback branch preserve the accepted
+branch state without commands that erase working-tree changes.
+
+For a subsystem-only rollback, start from the same clean-status and backup-ref
+preconditions and revert dependent commits newest-first as listed below.
 
 Live Activity rollback:
 
@@ -313,26 +361,16 @@ git revert aa05711
 Planning/docs-only rollback if needed:
 
 ```bash
-git revert ebe8d00
-git revert 33428f1
+git log --oneline performance-baseline-2026-07-10..HEAD -- \
+  docs/PERFORMANCE_ANALYSIS.md \
+  docs/PERFORMANCE_IMPLEMENTATION.md \
+  docs/superpowers/specs/2026-07-10-high-impact-performance-design.md \
+  docs/superpowers/plans/2026-07-10-high-impact-performance.md
 ```
 
-A combined revert of all pre-Task-5 branch commits, preserving dependency order:
-
-```bash
-git revert 0444aa5
-git revert 1fc2c47
-git revert 700bcbb
-git revert ff70856
-git revert 652a9e5
-git revert 0ca6d25
-git revert 88076c8
-git revert c0e40cb
-git revert 38fbe5b
-git revert aa05711
-git revert ebe8d00
-git revert 33428f1
-```
+Review that newest-first output and revert the selected documentation-only
+commits explicitly. The full-branch command above is the authoritative dynamic
+sequence when the intent is to remove every change after the baseline.
 
 After any partial revert, rerun `xcodegen generate`, the relevant focused tests,
 the full macOS suite, and the macOS/iOS build checks described above.
