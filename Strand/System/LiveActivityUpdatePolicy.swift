@@ -32,8 +32,8 @@ enum LiveActivityUpdatePolicy {
     }
 }
 
-/// Tracks pending Live Activity ends without depending on ActivityKit. End plans retain the exact
-/// target IDs captured by the controller, while a later successful push invalidates an unstarted plan.
+/// Tracks Live Activity end targets without depending on ActivityKit. Pending work can be canceled,
+/// while begun and completed target IDs remain unavailable for re-adoption.
 struct LiveActivityReconciliationState {
     struct EndPlan: Equatable {
         fileprivate let generation: UInt64
@@ -41,32 +41,61 @@ struct LiveActivityReconciliationState {
     }
 
     private var generation: UInt64 = 0
-    private var pendingEndGeneration: UInt64?
+    private var pendingEnds: [UInt64: EndPlan] = [:]
+    private var activeEndTargetIDs: [UInt64: Set<String>] = [:]
+    private var retiredTargetIDs: Set<String> = []
     private(set) var lastPush: Date?
 
     init() {}
 
     mutating func planEnd(targetIDs: [String]) -> EndPlan {
         generation &+= 1
-        pendingEndGeneration = generation
+        var unavailableIDs = pendingEnds.values.reduce(into: retiredTargetIDs) {
+            $0.formUnion($1.targetIDs)
+        }
+        unavailableIDs = activeEndTargetIDs.values.reduce(into: unavailableIDs) {
+            $0.formUnion($1)
+        }
+        var seenIDs: Set<String> = []
+        let plannedIDs = targetIDs.filter {
+            seenIDs.insert($0).inserted && !unavailableIDs.contains($0)
+        }
+        let plan = EndPlan(generation: generation, targetIDs: plannedIDs)
+        pendingEnds[plan.generation] = plan
         lastPush = nil
-        return EndPlan(generation: generation, targetIDs: targetIDs)
+        return plan
+    }
+
+    mutating func cancelPendingEndForValidUpdate() {
+        pendingEnds.removeAll()
+    }
+
+    func isAdoptable(activityID: String) -> Bool {
+        guard !retiredTargetIDs.contains(activityID) else { return false }
+        guard !pendingEnds.values.contains(where: { $0.targetIDs.contains(activityID) }) else {
+            return false
+        }
+        return !activeEndTargetIDs.values.contains { $0.contains(activityID) }
+    }
+
+    @discardableResult
+    mutating func beginEnd(_ plan: EndPlan) -> Bool {
+        guard pendingEnds[plan.generation] == plan else { return false }
+        pendingEnds.removeValue(forKey: plan.generation)
+        activeEndTargetIDs[plan.generation] = Set(plan.targetIDs)
+        return true
     }
 
     mutating func recordPush(at date: Date) {
-        generation &+= 1
-        pendingEndGeneration = nil
         lastPush = date
-    }
-
-    func shouldBeginEnd(_ plan: EndPlan) -> Bool {
-        generation == plan.generation && pendingEndGeneration == plan.generation
     }
 
     @discardableResult
     mutating func completeEnd(_ plan: EndPlan) -> Bool {
-        guard shouldBeginEnd(plan) else { return false }
-        pendingEndGeneration = nil
+        guard let completedIDs = activeEndTargetIDs.removeValue(forKey: plan.generation) else {
+            return false
+        }
+        retiredTargetIDs.formUnion(completedIDs)
         return true
     }
 }

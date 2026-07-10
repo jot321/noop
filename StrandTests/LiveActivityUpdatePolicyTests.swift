@@ -121,13 +121,58 @@ final class LiveActivityUpdatePolicyTests: XCTestCase {
 }
 
 final class LiveActivityReconciliationStateTests: XCTestCase {
-    func testNewPushInvalidatesUnstartedEndToken() {
+    func testPendingEndCanceledBeforeBeginPermitsOldTargetAdoption() {
         var state = LiveActivityReconciliationState()
         let plan = state.planEnd(targetIDs: ["old"])
 
-        state.recordPush(at: Date(timeIntervalSince1970: 1_001))
+        XCTAssertFalse(state.isAdoptable(activityID: "old"))
+        state.cancelPendingEndForValidUpdate()
 
-        XCTAssertFalse(state.shouldBeginEnd(plan))
+        XCTAssertTrue(state.isAdoptable(activityID: "old"))
+        XCTAssertFalse(state.beginEnd(plan))
+    }
+
+    func testBegunEndKeepsOldTargetNonAdoptableDuringNewerPush() {
+        var state = LiveActivityReconciliationState()
+        let plan = state.planEnd(targetIDs: ["old"])
+
+        XCTAssertTrue(state.beginEnd(plan))
+        state.cancelPendingEndForValidUpdate()
+
+        XCTAssertFalse(state.isAdoptable(activityID: "old"))
+    }
+
+    func testNewTargetRemainsAdoptableWhileOldTargetEnds() {
+        var state = LiveActivityReconciliationState()
+        let plan = state.planEnd(targetIDs: ["old"])
+
+        XCTAssertTrue(state.beginEnd(plan))
+        XCTAssertTrue(state.isAdoptable(activityID: "new"))
+    }
+
+    func testCompletedEndTargetRemainsNonAdoptableWhileActivityListLags() {
+        var state = LiveActivityReconciliationState()
+        let plan = state.planEnd(targetIDs: ["old"])
+
+        XCTAssertTrue(state.beginEnd(plan))
+        XCTAssertTrue(state.completeEnd(plan))
+        XCTAssertFalse(state.isAdoptable(activityID: "old"))
+    }
+
+    func testOverlappingPlansIsolateTargetIDSets() {
+        var state = LiveActivityReconciliationState()
+        let firstPlan = state.planEnd(targetIDs: ["old"])
+        let secondPlan = state.planEnd(targetIDs: ["old", "new"])
+
+        XCTAssertEqual(firstPlan.targetIDs, ["old"])
+        XCTAssertEqual(secondPlan.targetIDs, ["new"])
+        XCTAssertTrue(state.beginEnd(firstPlan))
+        XCTAssertTrue(state.beginEnd(secondPlan))
+
+        XCTAssertTrue(state.completeEnd(firstPlan))
+        XCTAssertFalse(state.isAdoptable(activityID: "old"))
+        XCTAssertFalse(state.isAdoptable(activityID: "new"))
+        XCTAssertTrue(state.completeEnd(secondPlan))
     }
 
     func testEndPlanCapturesOnlyTargetsPresentWhenPlanned() {
@@ -140,22 +185,14 @@ final class LiveActivityReconciliationStateTests: XCTestCase {
         XCTAssertEqual(plan.targetIDs, ["old-a", "old-b"])
     }
 
-    func testCurrentEndTokenBeginsAndCompletes() {
-        var state = LiveActivityReconciliationState()
-        let plan = state.planEnd(targetIDs: ["old"])
-
-        XCTAssertTrue(state.shouldBeginEnd(plan))
-        XCTAssertTrue(state.completeEnd(plan))
-        XCTAssertFalse(state.shouldBeginEnd(plan))
-    }
-
-    func testStaleCompletionCannotClearNewerPushState() {
+    func testCompletionDoesNotClearNewerPushState() {
         let pushedAt = Date(timeIntervalSince1970: 1_002)
         var state = LiveActivityReconciliationState()
-        let stalePlan = state.planEnd(targetIDs: ["old"])
+        let plan = state.planEnd(targetIDs: ["old"])
+        XCTAssertTrue(state.beginEnd(plan))
         state.recordPush(at: pushedAt)
 
-        XCTAssertFalse(state.completeEnd(stalePlan))
+        XCTAssertTrue(state.completeEnd(plan))
         XCTAssertEqual(state.lastPush, pushedAt)
     }
 }

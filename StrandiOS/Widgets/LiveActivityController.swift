@@ -33,13 +33,20 @@ final class LiveActivityController {
         activeRealtimeExperience: Bool,
         scoreProvider: () -> (recovery: Int?, effort: Int?)
     ) {
-        // Re-adopt an activity that outlived a previous app session. ActivityKit keeps Live Activities
-        // alive across launches/relaunches, but a fresh controller starts with `activity == nil`, so
-        // without recovering the handle here we can neither update nor END an already-showing activity
-        // — which made the #336 opt-out a no-op (#341: toggle off, heart stays) and risked spawning a
-        // duplicate on the start path below. Done on the HR tick rather than in `init` because
-        // `Activity.activities` isn't reliably hydrated at the instant of process launch.
-        if activity == nil { activity = Activity<NOOPActivityAttributes>.activities.first }
+        let canPush = enabled && connected && bpm != nil && authInfo.areActivitiesEnabled
+        if canPush {
+            // A valid push can cancel an end that has not begun. Begun or completed targets stay
+            // excluded even if ActivityKit keeps returning them while an end is suspended or settling.
+            reconciliation.cancelPendingEndForValidUpdate()
+            if let activity, !reconciliation.isAdoptable(activityID: activity.id) {
+                self.activity = nil
+            }
+            if activity == nil {
+                activity = Activity<NOOPActivityAttributes>.activities.first {
+                    reconciliation.isAdoptable(activityID: $0.id)
+                }
+            }
+        }
 
         let now = Date()
         let decision = LiveActivityUpdatePolicy.evaluate(
@@ -62,7 +69,7 @@ final class LiveActivityController {
             break
         }
 
-        guard authInfo.areActivitiesEnabled else { return }
+        guard canPush else { return }
 
         let score = scoreProvider()
         let state = NOOPActivityAttributes.ContentState(
@@ -97,19 +104,23 @@ final class LiveActivityController {
     }
 
     private func scheduleEnd() {
-        // Capture every currently existing activity before scheduling work, including stragglers and
-        // rare duplicates. A later activity is never added to this end plan.
-        let targets = Activity<NOOPActivityAttributes>.activities
+        // Snapshot current candidates before scheduling work. Reconciliation excludes targets already
+        // assigned to another pending, active, or completed plan.
+        let candidates = Activity<NOOPActivityAttributes>.activities
         activity = nil
-        let plan = reconciliation.planEnd(targetIDs: targets.map(\.id))
+        let plan = reconciliation.planEnd(targetIDs: candidates.map(\.id))
+        let targetIDs = Set(plan.targetIDs)
+        let targets = candidates.filter { targetIDs.contains($0.id) }
 
         guard !targets.isEmpty else {
-            reconciliation.completeEnd(plan)
+            if reconciliation.beginEnd(plan) {
+                reconciliation.completeEnd(plan)
+            }
             return
         }
 
         Task {
-            guard reconciliation.shouldBeginEnd(plan) else { return }
+            guard reconciliation.beginEnd(plan) else { return }
             for target in targets {
                 await target.end(nil, dismissalPolicy: .immediate)
             }
