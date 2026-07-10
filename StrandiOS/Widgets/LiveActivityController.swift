@@ -7,7 +7,7 @@ import ActivityKit
 @MainActor
 final class LiveActivityController {
     private var activity: Activity<NOOPActivityAttributes>?
-    private var lastPush: Date = .distantPast
+    private var lastPush: Date?
     /// Cached `ActivityAuthorizationInfo` — `update` runs at ~1 Hz off the live HR stream, and
     /// instantiating this system bridge per tick is needless allocation. ActivityKit's auth status
     /// only changes via Settings, so caching for the controller's lifetime is safe.
@@ -23,12 +23,15 @@ final class LiveActivityController {
     /// on top of the connected-driven end below).
     private static let staleAfter: TimeInterval = 120
 
-    /// Drive the activity from the latest live values. Lazily starts when the strap is CONNECTED (the
-    /// live link, not the sticky "paired" flag) and a heart rate is present; ends the moment the link
-    /// drops. Throttled to ~once every 2 s so we stay well under the Live Activity update budget.
-    func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil) {
-        guard authInfo.areActivitiesEnabled else { return }
-
+    /// Drive the activity from the latest live values. Starts immediately on a valid connected HR
+    /// sample, updates at the shared active/passive cadence, and ends immediately on opt-out or
+    /// disconnect. Score work is lazy so throttled packets and end paths do not scan repository days.
+    func update(
+        bpm: Int?,
+        connected: Bool,
+        activeRealtimeExperience: Bool,
+        scoreProvider: () -> (recovery: Int?, effort: Int?)
+    ) {
         // Re-adopt an activity that outlived a previous app session. ActivityKit keeps Live Activities
         // alive across launches/relaunches, but a fresh controller starts with `activity == nil`, so
         // without recovering the handle here we can neither update nor END an already-showing activity
@@ -37,34 +40,45 @@ final class LiveActivityController {
         // `Activity.activities` isn't reliably hydrated at the instant of process launch.
         if activity == nil { activity = Activity<NOOPActivityAttributes>.activities.first }
 
-        // User opt-out (#336): if the in-app toggle is off, never start — and end any activity that's
-        // already showing (the user just turned it off; this fires on the next ~1 Hz HR tick).
-        guard UnitPrefs.liveActivityEnabled() else {
-            if activity != nil { Task { await end() } }
-            return
-        }
+        let now = Date()
+        let decision = LiveActivityUpdatePolicy.evaluate(
+            hasExistingActivity: activity != nil,
+            enabled: UnitPrefs.liveActivityEnabled(),
+            connected: connected,
+            bpm: bpm,
+            activeRealtimeExperience: activeRealtimeExperience,
+            lastPush: lastPush,
+            now: now
+        )
 
-        // End the moment the live link drops — `bonded` stays true across every disconnect (it means
-        // "this strap is paired"), so keying off it left a frozen, fabricated "live" HR on the Lock
-        // Screen / Dynamic Island indefinitely after the strap went out of range.
-        if !connected {
+        switch decision {
+        case .none:
+            return
+        case .end:
             Task { await end() }
             return
+        case .start, .update:
+            break
         }
-        guard bpm != nil else { return }
 
-        let state = NOOPActivityAttributes.ContentState(bpm: bpm, recovery: recovery, bonded: connected,
-                                                        effort: effort)
-        let staleDate = Date().addingTimeInterval(Self.staleAfter)
+        guard authInfo.areActivitiesEnabled else { return }
+
+        let score = scoreProvider()
+        let state = NOOPActivityAttributes.ContentState(
+            bpm: bpm,
+            recovery: score.recovery,
+            bonded: connected,
+            effort: score.effort
+        )
+        let staleDate = now.addingTimeInterval(Self.staleAfter)
 
         if let activity {
-            guard Date().timeIntervalSince(lastPush) > 2 else { return }
-            lastPush = Date()
+            lastPush = now
             Task { await activity.update(ActivityContent(state: state, staleDate: staleDate)) }
         } else {
             // Set the start gate SYNCHRONOUSLY before any await so a second `update` arriving on the
             // main actor while `Activity.request` is still in flight bails here instead of issuing a
-            // second request. The 2-second throttle above only guards the update path.
+            // second request. Cadence is handled by the shared policy above.
             guard !isStarting else { return }
             isStarting = true
             do {
@@ -73,7 +87,7 @@ final class LiveActivityController {
                     content: ActivityContent(state: state, staleDate: staleDate),
                     pushType: nil
                 )
-                lastPush = Date()
+                lastPush = now
             } catch {
                 activity = nil
             }
@@ -89,6 +103,7 @@ final class LiveActivityController {
             await act.end(nil, dismissalPolicy: .immediate)
         }
         self.activity = nil
+        lastPush = nil
     }
 }
 #endif
