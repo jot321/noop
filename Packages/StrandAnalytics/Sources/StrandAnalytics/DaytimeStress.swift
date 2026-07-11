@@ -194,23 +194,28 @@ public enum DaytimeStress {
             aggs.append(HourAgg(bucket: b, meanHR: mHR, rmssd: rrRes.rmssd, nHR: hrs.count))
         }
 
-        // 3) The day's OWN quiet reference: centre on the CALM end (the lower quartile of
-        //    hourly mean HR, the upper quartile of hourly RMSSD), and spread from the
-        //    across-hour SD. This makes a flat day read ~baseline and a spiky day surface
-        //    its tense hours — without any cross-day history. Falls back to the plain mean
-        //    when there are too few scored hours for a quartile.
+        // 3) The day's OWN reference: centre on the MEDIAN waking hour, and spread from the
+        //    across-hour SD. Centring on the median is what ties the score to its own scale —
+        //    the logistic maps raw z = 0 onto 1.5 ("baseline"), so the reference MUST be the
+        //    typical hour for a typical hour to read ~1.5. A spiky day then surfaces its tense
+        //    hours above 1.5 and its calm hours below, with no cross-day history.
+        //
+        //    (This replaced a CALM-quartile anchor — lower-quartile HR / upper-quartile RMSSD —
+        //    which put z = 0 at the day's calmest hours, so the *median* hour already sat ~0.7 σ
+        //    "stressed" on both signals and squashed to ≈2.4: an ordinary desk day read as 15/16
+        //    waking hours HIGH and reliably tripped the sustained-high Breathe nudge. Verified
+        //    against real device data in Tools/analyze_data.py.)
         //
         //    Built from the WAKING hours only — the same hours scored in step 4. Sleep is the
         //    calmest, lowest-HR / highest-HRV stretch of the day, and the analysis window
         //    always begins at local midnight, so the current day routinely carries several
-        //    hours of it. Letting those night hours into the reference drags the "calm" anchor
-        //    far beneath every waking hour, inflating an ordinary calm day toward HIGH and
-        //    falsely tripping the sustained-high Breathe nudge.
+        //    hours of it. Letting those night hours into the reference drags the anchor far
+        //    beneath every waking hour, re-inflating an ordinary calm day toward HIGH.
         let referenceAggs = aggs.filter { isWakingHour($0.bucket) }
         let hrMeans = referenceAggs.compactMap { $0.meanHR }
         let rmssdVals = referenceAggs.compactMap { $0.rmssd }
-        let refHR = calmReference(hrMeans, calmIsLow: true)         // calm HR is LOW
-        let refRMSSD = calmReference(rmssdVals, calmIsLow: false)   // calm HRV is HIGH
+        let refHR = centerReference(hrMeans)
+        let refRMSSD = centerReference(rmssdVals)
         let sdHR = std(hrMeans, mean: mean(hrMeans))
         let sdRMSSD = std(rmssdVals, mean: mean(rmssdVals))
 
@@ -272,14 +277,14 @@ public enum DaytimeStress {
         return hourOfDay >= wakingStartHour && hourOfDay < wakingEndHour
     }
 
-    /// The day's "calm" reference for a signal: the quartile toward the calm end (lower
-    /// quartile when calm is LOW, e.g. HR; upper quartile when calm is HIGH, e.g. RMSSD).
-    /// Falls back to the plain mean below 4 values, and to nil when empty.
-    static func calmReference(_ xs: [Double], calmIsLow: Bool) -> Double? {
+    /// The day's reference for a signal: the MEDIAN of the hourly values, so the typical hour
+    /// reads at the logistic's 1.5 baseline (see step 3). Falls back to the plain mean below 4
+    /// values (too few for a stable median), and to nil when empty. Direction (HR up vs HRV down
+    /// = stress) is applied by `rawScore`, not here, so one median reference serves both signals.
+    static func centerReference(_ xs: [Double]) -> Double? {
         guard !xs.isEmpty else { return nil }
         guard xs.count >= 4 else { return mean(xs) }
-        let s = xs.sorted()
-        return calmIsLow ? quantile(s, 0.25) : quantile(s, 0.75)
+        return quantile(xs.sorted(), 0.5)
     }
 
     /// Linear-interpolated quantile of an already-sorted, non-empty array.

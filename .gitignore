@@ -74,6 +74,11 @@ android/app/release/
 deploy.env
 deploy.env.*
 secrets.*
+# Cloud-sync BYO-S3 creds baked into the personal build (CloudSyncProvisioning.swift). The real
+# plist carries a scoped IAM secret and must never be committed; the .example template is tracked.
+CloudSyncSecrets.plist
+**/CloudSyncSecrets.plist
+!CloudSyncSecrets.example.plist
 android/local.properties
 android/keystore.properties
 android/noop-release.jks

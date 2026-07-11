@@ -103,6 +103,25 @@ final class DaytimeStressTests: XCTestCase {
             "a calm desk day must not read as sustained high stress")
     }
 
+    func testOrdinaryVariedDayIsNotMostlyHigh() {
+        // Regression (median anchor): a real waking day varies — a calm morning, an active
+        // midday, an easy evening. The reference is the MEDIAN hour, so a typical hour reads
+        // ~1.5 and only genuinely elevated hours cross into HIGH. The prior calm-quartile anchor
+        // put z=0 at the day's calmest hours, so the median hour already squashed to ≈2.4 and an
+        // ordinary day read as ~15/16 hours HIGH (matching a real device capture). Assert the
+        // day is NOT mostly high and that the two clear spikes are still the ones flagged.
+        let bpm: [Int: Int] = [6: 62, 7: 64, 8: 65, 9: 65, 10: 84, 11: 92, 12: 100, 13: 96,
+                               14: 82, 15: 71, 16: 79, 17: 87, 18: 86, 19: 88, 20: 100, 21: 84]
+        let hr = bpm.sorted { $0.key < $1.key }.flatMap { hourHR($0.key, bpm: $0.value) }
+        let r = DaytimeStress.analyze(hr: hr, rr: [])
+        let highHours = r.scored.filter { $0.level! >= DaytimeStress.highBandFloor }
+        XCTAssertLessThanOrEqual(highHours.count, r.scored.count / 2,
+            "an ordinary varied day must not read as mostly HIGH (\(highHours.count)/\(r.scored.count))")
+        // The two 100-bpm hours are the day's genuine peaks and should be among the high ones.
+        XCTAssertTrue(highHours.contains { $0.hour == 12 })
+        XCTAssertTrue(highHours.contains { $0.hour == 20 })
+    }
+
     func testTimezoneOffsetShiftsWakingWindow() {
         // ts at UTC hour 4 with a +3 h offset lands at local hour 7 → inside waking hours.
         let hr = hourHR(4, bpm: 60)

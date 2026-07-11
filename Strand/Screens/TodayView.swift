@@ -2175,7 +2175,9 @@ struct TodayView: View {
             // the 30-day RHR/HRV baseline StressView reads, there's no number to show. A bare ", " read like a
             // broken card; show the honest calibrating state instead, matching StressView's empty/calibrating
             // copy and the owner's reply on #706.
-            return stressToday.map { "\(Int($0.rounded()))" } ?? Self.calibratingPlaceholder
+            // One decimal, matching StressView's hero/tile format: integer rounding on a 0–3 scale
+            // misreads the 1.5 baseline as "2" (the HIGH-band floor).
+            return stressToday.map { String(format: "%.1f", $0) } ?? Self.calibratingPlaceholder
         case .fitnessAge:
             return withUnit(fitnessAgeToday.map { "\(Int($0.rounded()))" } ?? "—")
         case .vitality:

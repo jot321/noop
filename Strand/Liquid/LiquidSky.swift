@@ -62,9 +62,12 @@ struct LiquidSky: View {
     /// Hour of day 0...24. Defaults to live time when nil.
     var hour: Double?
     @Environment(\.colorScheme) private var scheme
+    /// Drops the twinkle/breath to the idle poll while the user is scrolling (the scroll gate) — a
+    /// full-width 340pt Canvas redrawing at 20fps under a drag was frame budget the scroll needed.
+    @State private var idle = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { tl in
+        TimelineView(.animation(minimumInterval: idle ? liquidIdlePollInterval : 1.0 / 20.0)) { tl in
             let now = liquidSeconds(tl.date)
             let h = hour ?? liveHour()
             // The sky must dissolve into the SAME canvas colour the body uses (theme-aware surfaceBase),
@@ -76,6 +79,7 @@ struct LiquidSky: View {
                                blue: dark ? 24.0 / 255.0 : 247.0 / 255.0,
                                opacity: 1)
             Canvas { ctx, size in
+                liquidSettleCadence(settled: LiquidScrollGate.shared.isScrolling(now: now), idle: $idle)
                 render(ctx, size, hour: h, now: now, settle: settle)
             }
         }

@@ -49,6 +49,10 @@ struct StrandiOSApp: App {
         // Cloud auto-sync BGProcessing handler — same launch-time registration rule as above. The
         // scheduler stays inert unless the user opted into cloud sync AND automatic runs.
         CloudSyncScheduler.register()
+        // Zero-touch cloud-sync config for this personal build: seed bucket / region / creds / consent
+        // from the bundled (gitignored) CloudSyncSecrets.plist so the Cloud Sync card needs no setup.
+        // No-op when the resource is absent. App.init is main-actor, matching CloudSyncSettings.
+        CloudSyncProvisioning.seedIfPresent()
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
         CloudSyncScheduler.install(model)

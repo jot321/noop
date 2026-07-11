@@ -134,6 +134,27 @@ final class LiquidMotion {
     }
 }
 
+// MARK: - Scroll activity: one shared gate (no per-frame publishing)
+
+/// A single "the user is scrolling right now" signal for the live liquid canvases. Stamped from the
+/// Today scroll's per-frame offset callback (which fires only while content actually moves, including
+/// deceleration) and read from the Canvas draw closures — the same plain-property pattern as
+/// `LiquidMotion.tilt`, so a stamp never publishes or invalidates a view. While a scroll is in flight
+/// the animated canvases drop to `liquidIdlePollInterval`, handing the frame budget back to the
+/// scroll's own render loop instead of fighting it at 60fps.
+final class LiquidScrollGate {
+    static let shared = LiquidScrollGate()
+    /// Seconds (timeIntervalSinceReferenceDate) of the last observed scroll movement. Written and
+    /// read on main; a single Double, so a one-frame-stale read is harmless.
+    private(set) var lastMoveAt: Double = -1e9
+    private init() {}
+
+    func stamp() { lastMoveAt = Date().timeIntervalSinceReferenceDate }
+    /// True while scroll movement was seen within the last ~⅓s. `now` is the TimelineView clock
+    /// (`liquidSeconds`), so the per-frame check allocates nothing.
+    func isScrolling(now: Double) -> Bool { now - lastMoveAt < 0.35 }
+}
+
 // MARK: - Power state: pose the liquid still on Low Power Mode
 
 /// A single shared source of truth for Low Power Mode, so the decorative liquid canvases can pose

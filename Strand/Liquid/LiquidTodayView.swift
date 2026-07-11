@@ -64,6 +64,12 @@ struct LiquidTodayView: View {
     /// Flips true once the first load() completes. Until then the hero gauges + sky render STATIC so the
     /// launch data-churn (refresh publish + BLE/HR notifies) isn't fighting 4 live canvases + CoreMotion.
     @State private var dataLoaded = false
+    /// True once the hero band (scores + HR thread) has scrolled well out of the viewport. TimelineView
+    /// keeps ticking on clipped-out views, so without this the hero vessels + thread kept animating at
+    /// full rate while the user read Key Metrics at the bottom. Driven from the same scroll-offset
+    /// preference the pull-to-refresh uses, with a hysteresis band so it can't flap at the boundary;
+    /// flipping swaps the leaves to their cached static renders (`animated: false`).
+    @State private var heroOffscreen = false
 
     // Custom liquid pull-to-refresh: a vessel that FILLS as you drag, releases into a refresh (replaces
     // the system spinner). Driven by the scroll's top overscroll offset.
@@ -208,7 +214,20 @@ struct LiquidTodayView: View {
             #endif
         }
         .coordinateSpace(name: Self.pullSpace)
-        .onPreferenceChange(PullOffsetKey.self) { pull.update($0) { fireRefresh() } }
+        .onPreferenceChange(PullOffsetKey.self) { y in
+            // This fires on every frame the content moves (drag AND deceleration) — exactly the window
+            // the live canvases should stand down for. Stamping the gate is a plain property write
+            // (never publishes); the canvases poll it from their draw closures.
+            LiquidScrollGate.shared.stamp()
+            pull.update(y) { fireRefresh() }
+            // Hero-band visibility, with hysteresis (writes only on a crossing, never per frame).
+            // -700 puts the hero scores AND the HR thread card fully above the viewport.
+            if heroOffscreen {
+                if y > -640 { heroOffscreen = false }
+            } else if y < -700 {
+                heroOffscreen = true
+            }
+        }
         // The sky is a FIXED full-bleed backdrop drawn behind the scroll content, edge-to-edge under the
         // status bar. A ScrollView background does not scroll with the content, so pulling down never
         // moves the sky (the exact behaviour the scaffold uses on the classic Today).
@@ -383,11 +402,11 @@ struct LiquidTodayView: View {
     private var heroCard: some View {
         HStack(alignment: .top, spacing: 4) {
             HeroScoreCell(label: "Charge", score: displayDay?.recovery, tint: StrandPalette.chargeColor,
-                          pill: "WHOOP", animated: dataLoaded, onGuide: { guideSection = .charge })
+                          pill: "WHOOP", animated: dataLoaded && !heroOffscreen, onGuide: { guideSection = .charge })
             HeroScoreCell(label: "Effort", score: displayDay?.strain, tint: StrandPalette.effortColor,
-                          pill: nil, animated: dataLoaded, onGuide: { guideSection = .effort })
+                          pill: nil, animated: dataLoaded && !heroOffscreen, onGuide: { guideSection = .effort })
             HeroScoreCell(label: "Rest", score: restScore, tint: StrandPalette.restColor,
-                          pill: "WHOOP", animated: dataLoaded, onGuide: { guideSection = .rest })
+                          pill: "WHOOP", animated: dataLoaded && !heroOffscreen, onGuide: { guideSection = .rest })
         }
         .padding(.vertical, 16)
         .padding(.horizontal, 12)
@@ -416,7 +435,7 @@ struct LiquidTodayView: View {
                         // Isolated leaf: it observes LiveState so the ~1 Hz HR notifies re-render ONLY
                         // this card, never the whole Today. Shows the current bpm live with a rolling
                         // beat-by-beat trace; falls back to today's banked 5-minute trace when idle.
-                        LiquidLiveHR(tint: liquidHeart, fallback: hrValues, animated: dataLoaded)
+                        LiquidLiveHR(tint: liquidHeart, fallback: hrValues, animated: dataLoaded && !heroOffscreen)
                         HStack(spacing: 4) {
                             Spacer()
                             Text("Full day").font(StrandFont.caption).foregroundStyle(StrandPalette.accent)
@@ -805,6 +824,10 @@ struct LiquidTodayView: View {
         async let hrA = repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
         async let wkA = repo.workoutRows()
 
+        // Await EVERYTHING into locals first, then commit in ONE synchronous block at the end: an
+        // @State write landing between awaits schedules its own re-evaluation of this (large) body,
+        // so the old interleaved writes cost up to ~7 full passes per refresh — visible as a hitch
+        // when an auto-refresh landed mid-scroll. Batched, SwiftUI coalesces the commit into one pass.
         let restSeries = await restA
         let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         // Selected day's Rest; tail fallback only at offset 0 (a past day with no row shows nothing) AND
@@ -812,28 +835,35 @@ struct LiquidTodayView: View {
         // gravity ⇒ no sleep_performance point ever written) used to pin Rest to the weeks-old series tail
         // forever while Charge advanced; freshness-gate the tail-fallback so a stale tail falls through to
         // the Rest hero's No-Data/calibrating state (same empty treatment Effort uses) instead of freezing.
-        restScore = TodayView.freshRestScore(
+        let newRest = TodayView.freshRestScore(
             todayValue: restByDay[selectedDayKey], lastDay: restSeries.last?.day,
             lastValue: restSeries.last?.value, isTodaySelected: selectedDayOffset == 0,
             todayKey: selectedDayKey)
-        // StressModel loops the full history to build its baseline — run it OFF the main actor so a big
-        // history doesn't stutter the UI. Snapshot the inputs (value types) into the detached task.
-        let storedStress = await stressA
-        let daysSnapshot = repo.days
-        stress = await Task.detached(priority: .utility) {
-            StressModel(days: daysSnapshot, stored: storedStress)?.score
-        }.value
-        fitnessAge = (await fitA).last?.value   // history-wide latest banked (not day-scoped)
-        vitality = (await vitA).last?.value
+        let newFitnessAge = (await fitA).last?.value   // history-wide latest banked (not day-scoped)
+        let newVitality = (await vitA).last?.value
         // Steps is a DAILY metric, so key it to the SELECTED day (like restScore above), not the history-wide
         // latest. Without this, swiping to a past day with no strap step count showed today's estimate (the
         // `.last` value) instead of that day's. Mirrors the classic Today's stepsEstByDay[selectedDayKey].
         let stepsSeries = await stepsA
         let stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-        stepsEst = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
-        hrValues = (await hrA).map { $0.bpm }
-        workouts = await wkA
+        let newSteps = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
+        let newHrValues = (await hrA).map { $0.bpm }
+        let newWorkouts = await wkA
+        // StressModel loops the full history to build its baseline — run it OFF the main actor so a big
+        // history doesn't stutter the UI. Snapshot the inputs (value types) into the detached task.
+        let storedStress = await stressA
+        let daysSnapshot = repo.days
+        let newStress = await Task.detached(priority: .utility) {
+            StressModel(days: daysSnapshot, stored: storedStress)?.score
+        }.value
 
+        restScore = newRest
+        stress = newStress
+        fitnessAge = newFitnessAge
+        vitality = newVitality
+        stepsEst = newSteps
+        hrValues = newHrValues
+        workouts = newWorkouts
         // First load done — bring the hero gauges + sky to life now the launch churn has settled.
         if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
     }
@@ -890,7 +920,9 @@ struct LiquidTodayView: View {
         return unit.isEmpty ? n : "\(n) \(unit)"
     }
 
-    private var stressText: String { stress.map { String(Int($0.rounded())) } ?? "Calibrating" }
+    // One decimal, matching StressView: integer rounding on the 0–3 scale misreads the 1.5
+    // baseline as "2" (the HIGH-band floor).
+    private var stressText: String { stress.map { String(format: "%.1f", $0) } ?? "Calibrating" }
 
     private var sleepText: String {
         guard let m = displayDay?.totalSleepMin else { return "–" }
@@ -974,7 +1006,11 @@ final class LiquidPullState: ObservableObject {
     /// Feed the latest top-overscroll offset. Arms at the threshold and FIRES `onFire` on release
     /// (the pull springs back toward zero). Guarded so it can't double-fire or re-trigger mid-refresh.
     func update(_ y: CGFloat, onFire: () -> Void) {
-        pullY = max(0, y)
+        // Write only on a real change: this is called on EVERY scroll frame (minY changes all the way
+        // down the page, clamped here to 0), and an unconditional assignment fires objectWillChange
+        // regardless of value — re-rendering the indicator on every frame of every scroll, not just pulls.
+        let clamped = max(0, y)
+        if clamped != pullY { pullY = clamped }
         guard !refreshing else { return }
         if pullY >= threshold, !armed {
             armed = true

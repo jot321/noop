@@ -72,11 +72,14 @@ struct RootTabView: View {
             // easing cubic-bezier(0.22,1,0.36,1).
             .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24), value: selectedTab)
             // Swipe left/right anywhere to move between tabs (2026-07-02). Simultaneous so vertical
-            // scrolling still works; only a decisive horizontal flick switches tabs.
+            // scrolling still works; only a decisive horizontal flick switches tabs. On Today (tab 0)
+            // the recognizer is disabled OUTRIGHT via the `.subviews` mask — Today owns horizontal
+            // swipe for day nav, and even an inert recognizer still takes part in touch arbitration
+            // on every scroll there (Today already layers its own day-swipe drag on the same surface).
             .simultaneousGesture(
                 DragGesture(minimumDistance: 24)
                     .onEnded { v in
-                        // Today (tab 0) uses horizontal swipe to change DAYS, so tab-swipe is off there.
+                        // Belt-and-braces alongside the mask below: Today swipes change DAYS, not tabs.
                         guard selectedTab != 0 else { return }
                         let dx = v.translation.width, dy = v.translation.height
                         guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
@@ -84,7 +87,8 @@ struct RootTabView: View {
                         if next != selectedTab {
                             withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = next }
                         }
-                    }
+                    },
+                including: selectedTab == 0 ? .subviews : .all
             )
 
             FloatingTabBar(selection: $selectedTab, onReselect: { _ in

@@ -175,7 +175,13 @@ enum LiquidRender {
     }
 
     /// The live heart-rate curve as a glowing liquid thread with a travelling glint.
-    static func thread(_ base: GraphicsContext, _ size: CGSize, values: [Double], now: Double, tint: Color) {
+    ///
+    /// Only the glint's dash phase and the endpoint pulse change frame-to-frame; the curve itself only
+    /// changes when the series or canvas size do. With a `cache` the ~288-point quad-curve Path is
+    /// rebuilt on a real change and merely STROKED per frame (it used to be built twice a frame, every
+    /// frame, at 60fps — the single heaviest standing cost on the Today scroll).
+    static func thread(_ base: GraphicsContext, _ size: CGSize, values: [Double], now: Double,
+                       tint: Color, cache: LiquidThreadPathCache? = nil) {
         guard values.count >= 2 else { return }
         let w = size.width, h = size.height, pad: Double = 10
         var mn = Double.greatestFiniteMagnitude, mx = -Double.greatestFiniteMagnitude
@@ -184,7 +190,10 @@ enum LiquidRender {
         let n = values.count
         func px(_ i: Int) -> Double { pad + Double(i) * (w - 2 * pad) / Double(n - 1) }
         func py(_ v: Double) -> Double { h - pad - (v - mn) / span * (h - 2 * pad) }
-        func curve() -> Path {
+        let curve: Path
+        if let cache, cache.size == size, cache.values == values {
+            curve = cache.path
+        } else {
             var p = Path()
             p.move(to: CGPoint(x: px(0), y: py(values[0])))
             for i in 1..<(n - 1) {
@@ -192,13 +201,14 @@ enum LiquidRender {
                 p.addQuadCurve(to: CGPoint(x: xc, y: yc), control: CGPoint(x: px(i), y: py(values[i])))
             }
             p.addLine(to: CGPoint(x: px(n - 1), y: py(values[n - 1])))
-            return p
+            curve = p
+            if let cache { cache.size = size; cache.values = values; cache.path = p }
         }
         var ctx = base
-        ctx.stroke(curve(), with: .color(tint.opacity(0.9)), style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
+        ctx.stroke(curve, with: .color(tint.opacity(0.9)), style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
         // travelling glint
         let phase = -(now * 55).truncatingRemainder(dividingBy: 414)
-        ctx.stroke(curve(), with: .color(.white.opacity(0.55)),
+        ctx.stroke(curve, with: .color(.white.opacity(0.55)),
                    style: StrokeStyle(lineWidth: 1.1, lineCap: .round, dash: [14, 400], dashPhase: phase))
         // endpoint pulse
         let ex = px(n - 1), ey = py(values[n - 1])
@@ -206,6 +216,15 @@ enum LiquidRender {
         ctx.fill(Path(ellipseIn: CGRect(x: ex - pr - 4, y: ey - pr - 4, width: (pr + 4) * 2, height: (pr + 4) * 2)), with: .color(tint.opacity(0.15)))
         ctx.fill(Path(ellipseIn: CGRect(x: ex - pr, y: ey - pr, width: pr * 2, height: pr * 2)), with: .color(tint))
     }
+}
+
+/// Frame-to-frame reuse for `LiquidRender.thread`: the curve Path (keyed on the series + canvas size).
+/// Held by `LiquidThread` as plain `@State` (a reference type SwiftUI never observes) and mutated from
+/// inside the draw closure — the same "mutate a reference type during draw" pattern as `LiquidSim`.
+final class LiquidThreadPathCache {
+    var values: [Double] = []
+    var size: CGSize = .zero
+    var path = Path()
 }
 
 // MARK: - Adaptive cadence (U6)
@@ -259,12 +278,15 @@ struct LiquidVessel: View {
 
     private var gauge: some View {
         // 60fps while sloshing (on the 120Hz ProMotion panel a 30fps cap read as juddery), dropping to
-        // a slow poll once the fluid settles (U6) so a still hero vessel stops paying the full budget.
+        // a slow poll once the fluid settles (U6) so a still hero vessel stops paying the full budget —
+        // or while the user is scrolling (the scroll gate), so the vessels never fight the scroll's
+        // render loop for main-thread time.
         TimelineView(.animation(minimumInterval: idle ? liquidIdlePollInterval : 1.0 / 60.0)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: value ?? 0)
-                liquidSettleCadence(settled: sim.settled, idle: $idle)
+                liquidSettleCadence(settled: sim.settled || LiquidScrollGate.shared.isScrolling(now: now),
+                                    idle: $idle)
                 LiquidRender.vessel(context, size, sim, now: now, tint: tint)
             }
         }
@@ -306,12 +328,13 @@ struct LiquidTube: View {
     }
 
     private var liveTube: some View {
-        // 30fps while flowing, a slow poll once settled (U6).
+        // 30fps while flowing, a slow poll once settled (U6) or while the user is scrolling.
         TimelineView(.animation(minimumInterval: idle ? liquidIdlePollInterval : 1.0 / 30.0)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: frac)
-                liquidSettleCadence(settled: sim.settled, idle: $idle)
+                liquidSettleCadence(settled: sim.settled || LiquidScrollGate.shared.isScrolling(now: now),
+                                    idle: $idle)
                 LiquidRender.tube(context, size, sim, now: now, frac: max(0, min(1, frac)), tint: tint)
             }
         }
@@ -338,16 +361,22 @@ struct LiquidThread: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var power = LiquidPower.shared
+    @State private var idle = false
+    @State private var cache = LiquidThreadPathCache()
 
     var body: some View {
         if animated && !reduceMotion && !power.lowPower { liveThread } else { staticThread }
     }
 
     private var liveThread: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { tl in   // 60fps to flow smoothly on ProMotion
+        // 60fps so the glint flows smoothly on ProMotion, dropping to the idle poll while the user is
+        // scrolling — this canvas has no settle state (the glint never stops), so without the scroll
+        // gate it paid the full 60fps budget under every drag.
+        TimelineView(.animation(minimumInterval: idle ? liquidIdlePollInterval : 1.0 / 60.0)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
-                LiquidRender.thread(context, size, values: bpm, now: now, tint: tint)
+                liquidSettleCadence(settled: LiquidScrollGate.shared.isScrolling(now: now), idle: $idle)
+                LiquidRender.thread(context, size, values: bpm, now: now, tint: tint, cache: cache)
             }
         }
         .frame(height: height)
