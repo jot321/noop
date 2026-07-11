@@ -175,6 +175,42 @@ Do not proceed if `PRAGMA quick_check` is not `ok`.
 
 ## Install through SideStore
 
+Before installing with SideStore 0.6.3 on iOS 26.4 or later, open **SideStore → Settings → VPN Configuration**. Under **User Configuration**, set **Device IP** to `10.7.0.1` and tap **Confirm**. The 0.6.3 fallback is `192.168.1.50`; leaving it unchanged causes signing to finish but the final installation to hang. The SideStore console should report that the override peer is reachable at `10.7.0.1`.
+
+SideStore also needs a personalized developer disk image. Normally it downloads this automatically. If `Documents/ConsoleLogs` reports that `Documents/DMG/Image.dmg` does not exist, stage the three files referenced by SideStore's minimuxer dependency. The revision below is the one validated with build 174; re-check the dependency before changing it for a future iOS/SideStore release.
+
+```bash
+DDI_REV='b122caa4283a389aa521a92de2f2d456db0d3ab0'
+DDI="$DIAGNOSTICS/sidestore/DMG"
+DDI_BASE="https://raw.githubusercontent.com/doronz88/DeveloperDiskImage/$DDI_REV/PersonalizedImages/Xcode_iOS_DDI_Personalized"
+
+rm -rf "$DDI"
+mkdir -p "$DDI"
+curl -fL --retry 3 "$DDI_BASE/Image.dmg" -o "$DDI/Image.dmg"
+curl -fL --retry 3 "$DDI_BASE/Image.dmg.trustcache" -o "$DDI/Image.dmg.trustcache"
+curl -fL --retry 3 "$DDI_BASE/BuildManifest.plist" -o "$DDI/BuildManifest.plist"
+plutil -lint "$DDI/BuildManifest.plist"
+shasum -a 256 "$DDI"/*
+
+xcrun devicectl device process terminate \
+  --device "$DEVICE_ID" \
+  "$SIDESTORE_BUNDLE_ID" || true
+xcrun devicectl device copy to \
+  --device "$DEVICE_ID" \
+  --domain-type appDataContainer \
+  --domain-identifier "$SIDESTORE_BUNDLE_ID" \
+  --source "$DDI" \
+  --destination Documents/DMG \
+  --remove-existing-content false \
+  --timeout 120
+xcrun devicectl device process launch \
+  --device "$DEVICE_ID" \
+  --terminate-existing \
+  "$SIDESTORE_BUNDLE_ID"
+```
+
+Confirm `DDI mounted successfully` in the newest SideStore console log before retrying the IPA.
+
 Find the Mac's LAN address and serve only the IPA directory temporarily:
 
 ```bash
