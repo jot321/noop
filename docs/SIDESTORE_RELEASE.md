@@ -197,6 +197,8 @@ xcrun devicectl device process launch \
 
 Keep LocalDevVPN connected. Wait for SideStore to finish signing and installing, and confirm the HTTP server received the phone's request. Then stop the server with Control-C.
 
+When SideStore detects the NOOP widget, it may pause at **App Contains Extensions**. Choose **Keep App Extensions (Register App ID for Each Extension)** to retain the widget with its own registered identifier. This confirmation is required even when the incoming and installed extensions match.
+
 Do not delete NOOP before this step. SideStore must upgrade the existing suffixed bundle identifier to preserve its container.
 
 ## Verify the upgrade and live persistence

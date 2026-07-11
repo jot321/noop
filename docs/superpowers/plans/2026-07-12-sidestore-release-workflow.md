@@ -252,6 +252,8 @@ sidestore://install?url=http%3A%2F%2F<MAC_LAN_IP>%3A8765%2FNOOP-174.ipa
 
 Expected: the phone downloads the IPA and SideStore reports installation success. Stop the temporary server afterward.
 
+If SideStore displays **App Contains Extensions**, choose **Keep App Extensions (Register App ID for Each Extension)** so the NOOP widget is preserved with its own registered identifier.
+
 - [ ] **Step 4: Verify installed state and preserved data**
 
 Run:
