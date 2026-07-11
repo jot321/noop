@@ -183,7 +183,9 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
 WIDGET=$(find "$APP/PlugIns" -name '*.appex' -maxdepth 2 -print -quit)
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$WIDGET/Info.plist")" = 174
 test -f "$APP/CloudSyncSecrets.plist"
-cmp -s StrandiOS/Resources/CloudSyncSecrets.plist "$APP/CloudSyncSecrets.plist"
+SOURCE_SECRET_HASH=$(plutil -convert json -o - StrandiOS/Resources/CloudSyncSecrets.plist | jq -S -c . | shasum -a 256 | awk '{print $1}')
+BUILT_SECRET_HASH=$(plutil -convert json -o - "$APP/CloudSyncSecrets.plist" | jq -S -c . | shasum -a 256 | awk '{print $1}')
+test "$SOURCE_SECRET_HASH" = "$BUILT_SECRET_HASH"
 ```
 
 Expected: every command exits 0; no secret value is printed.

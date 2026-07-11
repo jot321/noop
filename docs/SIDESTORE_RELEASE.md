@@ -108,8 +108,8 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" 
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$WIDGET/Info.plist")" = "$BUILD"
 test -f "$APP/CloudSyncSecrets.plist"
 
-SOURCE_SECRET_HASH=$(plutil -convert json -o - StrandiOS/Resources/CloudSyncSecrets.plist | shasum -a 256 | awk '{print $1}')
-BUILT_SECRET_HASH=$(plutil -convert json -o - "$APP/CloudSyncSecrets.plist" | shasum -a 256 | awk '{print $1}')
+SOURCE_SECRET_HASH=$(plutil -convert json -o - StrandiOS/Resources/CloudSyncSecrets.plist | jq -S -c . | shasum -a 256 | awk '{print $1}')
+BUILT_SECRET_HASH=$(plutil -convert json -o - "$APP/CloudSyncSecrets.plist" | jq -S -c . | shasum -a 256 | awk '{print $1}')
 test "$SOURCE_SECRET_HASH" = "$BUILT_SECRET_HASH"
 ```
 
