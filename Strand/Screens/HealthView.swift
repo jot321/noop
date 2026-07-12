@@ -995,6 +995,11 @@ private struct VitalitySection: View {
     @State private var vitality: Double?
     @State private var bodyAge: Double?
     @State private var loaded = false
+    /// Presents the Vitality trend as an item-driven sheet — same idiom Fitness Age uses (these shared
+    /// screens aren't hosted in a per-screen NavigationStack, so a sheet is the in-app drill-down).
+    @State private var showTrend = false
+    /// The catalog descriptor backing the Vitality trend sheet (now that history is backfilled, WS-3a).
+    private var vitalityMetric: MetricDescriptor? { MetricCatalog.all.first { $0.key == "vitality" && $0.source == "my-whoop" } }
 
     private var contributions: [VitalityEngine.Contribution] {
         let last7 = repo.days.suffix(7)
@@ -1023,12 +1028,22 @@ private struct VitalitySection: View {
             SectionHeader("Vitality", overline: "Weekly",
                           trailing: bodyAge != nil ? String(localized: "Body Age \(Int((bodyAge ?? 0).rounded()))") : nil)
             if let v = vitality, let ba = bodyAge {
-                hero(vitality: v, bodyAge: ba)
+                Button { showTrend = true } label: { hero(vitality: v, bodyAge: ba) }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens your Vitality trend")
             } else if loaded {
                 ComingSoon(what: "A few more days and we can show your Vitality.", symbol: "sparkles")
             } else {
                 ComingSoon(what: "Reading your Vitality…", symbol: "sparkles")
             }
+        }
+        .sheet(isPresented: $showTrend) {
+            NavigationStack {
+                if let m = vitalityMetric { MetricDetailView(metric: m) }
+            }
+            #if os(macOS)
+            .frame(width: 900, height: 820)
+            #endif
         }
         .task(id: repo.refreshSeq) { await load() }
     }

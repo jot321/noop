@@ -57,6 +57,13 @@ public struct TrendChart: View {
     /// curve and the top axis label clear of the plot clip (see #974); done purely in data space
     /// so it needs no macOS14/iOS17 plot-dimension padding API — works on our macOS13/iOS16 floor.
     public var yDomain: ClosedRange<Double>?
+    /// Personal-baseline band: when set, a soft shaded horizontal band (the user's normal range)
+    /// is drawn BENEATH the line across the full x-extent, so a reading reads as inside/outside
+    /// *your* normal rather than a naked number. nil = no band.
+    public var baselineBand: ClosedRange<Double>?
+    /// Center line of the baseline band (the personal baseline itself), drawn as a faint dashed
+    /// rule inside the band. nil = no center line.
+    public var baselineCenter: Double?
 
     /// Mean of all point values, computed once in `init` so the area fill's gradient
     /// stop doesn't run an O(n) reduce for every mark on every render.
@@ -76,7 +83,9 @@ public struct TrendChart: View {
         dateFormat: @escaping (Date) -> String = { TrendChart.defaultDateString($0) },
         accessibilityLabel: String? = nil,
         nowCapColor: Color? = nil,
-        yDomain: ClosedRange<Double>? = nil
+        yDomain: ClosedRange<Double>? = nil,
+        baselineBand: ClosedRange<Double>? = nil,
+        baselineCenter: Double? = nil
     ) {
         let sorted = points.sorted { $0.date < $1.date }
         self.points = sorted
@@ -90,6 +99,8 @@ public struct TrendChart: View {
         self.accessibilityLabel = accessibilityLabel
         self.nowCapColor = nowCapColor
         self.yDomain = yDomain
+        self.baselineBand = baselineBand
+        self.baselineCenter = baselineCenter
         let avg = sorted.isEmpty
             ? valueRange.lowerBound
             : sorted.map(\.value).reduce(0, +) / Double(sorted.count)
@@ -164,6 +175,23 @@ public struct TrendChart: View {
 
     public var body: some View {
         Chart {
+            // Personal-baseline band: drawn FIRST so the area/line/points render over it. A soft
+            // neutral fill (never a status colour — the band is context, not a judgement) plus an
+            // optional faint dashed center rule. Clamped to the resolved Y domain by the plot clip.
+            if let band = baselineBand {
+                RectangleMark(
+                    xStart: .value("Start", points.first?.date ?? Date()),
+                    xEnd: .value("End", points.last?.date ?? Date()),
+                    yStart: .value("Band low", band.lowerBound),
+                    yEnd: .value("Band high", band.upperBound)
+                )
+                .foregroundStyle(StrandPalette.textTertiary.opacity(0.10))
+            }
+            if let center = baselineCenter {
+                RuleMark(y: .value("Baseline", center))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .foregroundStyle(StrandPalette.textTertiary.opacity(0.38))
+            }
             if showsArea {
                 ForEach(displayPoints) { p in
                     AreaMark(

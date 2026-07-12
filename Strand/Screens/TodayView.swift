@@ -295,6 +295,10 @@ struct TodayView: View {
     // 0.0 (#402). nil below StrainScorer.minReadings (we then fall back to the stored daily row) and on
     // any navigated past day (those use the stored value).
     @State private var liveTodayStrain: Double?
+    /// Today's Effort coverage breakdown (WS-3b), computed over the SAME midnight→now HR the live
+    /// Effort integrates, so the low-Effort explainer can cite real minutes ("14 h of HR, 0 min above
+    /// 50% HRR") rather than a bare reassurance. nil for a past day or before there's HR to summarise.
+    @State private var liveTodayEffortCoverage: StrainScorer.EffortCoverage?
 
     // The HR chart's x-axis window. Today → midnight…now; a navigated PAST day → the full calendar
     // day (midnight…next midnight) so a morning with no banked data reads as empty space rather than
@@ -2796,7 +2800,30 @@ struct TodayView: View {
     /// own overlay, a past day isn't annotated).
     private var effortZeroNote: String? {
         guard selectedDayOffset == 0, let s = effortStrain(displayDay), s < 1.0 else { return nil }
+        // WS-3b: when we have the day's coverage, cite the real numbers so a near-zero Effort reads as
+        // VERIFIED CALM ("we saw 14 h of HR, 0 min above 50% HRR") rather than possibly-missing data.
+        // Only when there's a meaningful amount of HR to stand behind the claim (≥30 min); below that we
+        // fall back to the generic explainer so we never over-claim coverage we don't have.
+        if let cov = liveTodayEffortCoverage, cov.coverageMinutes >= 30 {
+            let seen = Self.durationPhrase(minutes: cov.coverageMinutes)
+            let active = cov.activeMinutes
+            if active < 1.0 {
+                return String(localized: "Verified calm: we saw \(seen) of heart rate today and none of it above your effort zone (about 50% of your heart-rate reserve). A calm day honestly reads near zero — this isn't missing data.")
+            }
+            let activePhrase = Self.durationPhrase(minutes: active)
+            return String(localized: "We saw \(seen) of heart rate today, with \(activePhrase) in your effort zone (about 50% of your heart-rate reserve). Effort stays low until more time lands in that zone.")
+        }
         return String(localized: "No cardio load yet. Effort builds once your heart rate climbs into your effort zone (around 50% of your heart-rate reserve). A calm day honestly reads near zero.")
+    }
+
+    /// A compact "14 h 20 min" / "45 min" duration phrase from minutes, for the low-Effort explainer.
+    /// Whole-phrase variants so translators never see a stitched hour/minute fragment.
+    static func durationPhrase(minutes: Double) -> String {
+        let total = Int(minutes.rounded())
+        let h = total / 60, m = total % 60
+        if h == 0 { return String(localized: "\(m) min") }
+        if m == 0 { return String(localized: "\(h) h") }
+        return String(localized: "\(h) h \(m) min")
     }
 
     /// Strain value to feed the Effort gauge, on the SELECTED display scale (#313). The effective
@@ -3804,6 +3831,7 @@ struct TodayView: View {
         hrPoints = c.hrPoints
         stepActivityClassToday = c.stepActivityClassToday
         liveTodayStrain = c.liveTodayStrain
+        liveTodayEffortCoverage = c.liveTodayEffortCoverage
         hrZoomDomain = Self.reclampHrZoom(hrZoomDomain, oldAxis: hrAxis, newAxis: c.hrAxis)
         hrAxis = c.hrAxis
         sleepToday = c.sleepToday
@@ -3950,15 +3978,20 @@ struct TodayView: View {
         // engine will eventually persist. Below StrainScorer.minReadings the scorer returns nil and the
         // gauge falls back to the stored row (never a fabricated value); a navigated past day clears it.
         let liveStrainLocal: Double?
+        let effortCoverageLocal: StrainScorer.EffortCoverage?
         if selectedDayOffset == 0 {
             let todayHr = await repo.hrSamples(from: windowStart, to: windowEnd)
             let maxHR = profile.age > 0 ? StrainScorer.tanakaHRmax(age: Double(profile.age)) : nil
             let restHR = displayDay?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
             liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR, sex: profile.sex)
+            // Coverage reuses the SAME todayHr read + params, so the explainer reconciles with the score.
+            effortCoverageLocal = StrainScorer.effortCoverage(todayHr, maxHR: maxHR, restingHR: restHR)
         } else {
             liveStrainLocal = nil
+            effortCoverageLocal = nil
         }
         liveTodayStrain = liveStrainLocal
+        liveTodayEffortCoverage = effortCoverageLocal
         // Pin the chart axis to the loaded window, today midnight→now, a past day the full 24h, so
         // a gap (e.g. a morning the strap wasn't banking) shows as empty space, not a late start.
         let newAxis = Date(timeIntervalSince1970: TimeInterval(windowStart))
@@ -3998,6 +4031,7 @@ struct TodayView: View {
             hrPoints: hrPointsLocal,
             stepActivityClassToday: stepClassLocal,
             liveTodayStrain: liveStrainLocal,
+            liveTodayEffortCoverage: effortCoverageLocal,
             hrAxis: newAxis,
             sleepToday: sleepTodayLocal,
             bankedAt: Date())
@@ -4330,6 +4364,9 @@ struct TodayDayScopedCache {
     let hrPoints: [TrendPoint]
     let stepActivityClassToday: Int?
     let liveTodayStrain: Double?
+    /// Today's Effort coverage (WS-3b), banked with the live strain so a cache hit restores the
+    /// low-Effort explainer's real minutes without re-reading the day's HR.
+    let liveTodayEffortCoverage: StrainScorer.EffortCoverage?
     let hrAxis: ClosedRange<Date>
     let sleepToday: CachedSleepSession?
     /// When the snapshot was banked. TODAY hits are age-gated on this (`todayCacheMaxAge`): live banking

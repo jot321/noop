@@ -195,6 +195,53 @@ final class IntelligenceEngine: ObservableObject {
         return fmt.string(from: sat)
     }
 
+    /// Integer day index (days since the Unix epoch, UTC) for a "yyyy-MM-dd" string — a stable,
+    /// gap-aware ordinal so windowed engines (ACWR) can align days and zero-fill rest days. nil if
+    /// the string can't be parsed.
+    static func epochDayIndex(_ dayStr: String) -> Int? {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd"
+        guard let d = fmt.date(from: dayStr) else { return nil }
+        return Int((d.timeIntervalSince1970 / 86_400).rounded(.down))
+    }
+
+    /// A "yyyy-MM-dd" day string offset by whole days from another (e.g. -6 for a week window start).
+    /// Same local-calendar convention as `saturdayKey`. nil only if the input can't be parsed.
+    static func dayString(offsetDays: Int, from dayStr: String) -> String? {
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = .current
+        let fmt = DateFormatter(); fmt.calendar = cal; fmt.timeZone = cal.timeZone
+        fmt.locale = Locale(identifier: "en_US_POSIX"); fmt.dateFormat = "yyyy-MM-dd"
+        guard let d = fmt.date(from: dayStr),
+              let off = cal.date(byAdding: .day, value: offsetDays, to: d) else { return nil }
+        return fmt.string(from: off)
+    }
+
+    /// Compute the weekly Vitality + Body Age points for ONE week's worth of dailies, keyed to the
+    /// given Saturday. Pure (no store/IO) so the backfill loop can call it per historical week and
+    /// the current-week path shares the exact same math. Returns an empty array when VitalityEngine's
+    /// ≥3-input honesty gate isn't met (a legitimate gap — never a fabricated point).
+    static func vitalityPoints(week: [DailyMetric], satKey: String, chronoAge: Double) -> [MetricPoint] {
+        let rhrs = week.compactMap { $0.restingHr }.map(Double.init)
+        let nights = week.compactMap { $0.totalSleepMin }.map { Double($0) / 60.0 }.filter { $0 > 0 }
+        let hrvs = week.compactMap { $0.avgHrv }
+        let steps = week.compactMap { $0.steps }.map(Double.init)
+        let inputs = VitalityEngine.Inputs(
+            chronoAge: chronoAge,
+            restingHR: rhrs.isEmpty ? nil : medianOf(rhrs),
+            sleepHours: nights.isEmpty ? nil : nights.reduce(0, +) / Double(nights.count),
+            sleepConsistency: VitalityEngine.sleepConsistency(nightlyHours: nights),
+            rmssd: hrvs.isEmpty ? nil : medianOf(hrvs),
+            rmssdNorm: VitalityEngine.rmssdNorm(forAge: chronoAge),
+            steps: steps.isEmpty ? nil : steps.reduce(0, +) / Double(steps.count))
+        guard let res = VitalityEngine.compute(inputs) else { return [] }
+        return [
+            MetricPoint(day: satKey, key: "vitality", value: res.vitality),
+            MetricPoint(day: satKey, key: "body_age", value: res.bodyAge),
+        ]
+    }
+
     /// UserDefaults flag guarding the one-shot #313 full-history Effort rescore (below). Set once the
     /// pass completes so it never re-runs.
     static let effortRescoreFlagKey = "intelligence.effortRescore.v313.done"
@@ -1054,18 +1101,31 @@ final class IntelligenceEngine: ObservableObject {
             dayWorkouts += (try? await store.workouts(deviceId: "apple-health", from: sleepEnd,
                                                       to: sleepEnd + 18 * 3600, limit: 200)) ?? []
             var hrrResults: [HRRecoveryEngine.Result] = []
+            // DFA-α1 (WS-4d, EXPERIMENTAL): the R-R detrended-fluctuation exponent per workout, a lab-free
+            // aerobic/anaerobic-threshold proxy. Wrist-PPG R-R under motion is artifact-heavy, so the engine
+            // gates hard on artifact fraction and self-hides on noisy sessions — many workouts write nothing
+            // by design; steady low-motion cardio (cycling, easy runs) is where it survives. The day's value
+            // is the MEDIAN α1 across qualifying workouts (a stable per-day summary of intensity control).
+            var dfaAlphas: [Double] = []
             for w in dayWorkouts where w.endTs > w.startTs && (w.endTs - w.startTs) >= 8 * 60 {
                 let hrTail = (try? await store.hrSamples(deviceId: owner, from: w.endTs - 30,
                                                          to: w.endTs + 135, limit: 500)) ?? []
                 if let r = HRRecoveryEngine.analyze(hr: hrTail, workoutEnd: w.endTs) {
                     hrrResults.append(r)
                 }
+                // Steady-state R-R over the workout body (skip the first/last 60 s ramp) → DFA-α1.
+                let wRR = (try? await store.rrIntervals(deviceId: owner, from: w.startTs + 60,
+                                                        to: w.endTs - 60, limit: 200_000)) ?? []
+                if let dfa = DFAAlpha1Engine.analyze(rr: wRR) { dfaAlphas.append(dfa.alpha1) }
             }
             if let best = HRRecoveryEngine.bestOfDay(hrrResults) {
                 advPoints.append(MetricPoint(day: day, key: "hrr60", value: best.drop60))
                 if let d120 = best.drop120 {
                     advPoints.append(MetricPoint(day: day, key: "hrr120", value: d120))
                 }
+            }
+            if !dfaAlphas.isEmpty {
+                advPoints.append(MetricPoint(day: day, key: "dfa_a1", value: IntelligenceEngine.medianOf(dfaAlphas)))
             }
         }
         if !advPoints.isEmpty { _ = try? await store.upsertMetricSeries(advPoints, deviceId: computedId) }
@@ -1098,28 +1158,47 @@ final class IntelligenceEngine: ObservableObject {
             _ = try? await store.upsertMetricSeries(faPts, deviceId: computedId)
         }
 
-        // ── Vitality / Body Age (Phase 7) , weekly, keyed to the week's Saturday ────────────────────
-        // Roll the last 7 days' wearable signals into the mortality-hazard model and upsert a weekly
-        // Vitality (0–100) + Body Age. VitalityEngine gates on ≥3 inputs, so a sparse week writes nothing.
+        // ── Vitality / Body Age (Phase 7) , weekly, keyed to each week's Saturday ────────────────────
+        // Roll a week's wearable signals into the mortality-hazard model and upsert a weekly Vitality
+        // (0–100) + Body Age. VitalityEngine gates on ≥3 inputs, so a sparse week writes nothing.
         // (VO₂max is omitted here , fitness is already its own Fitness Age headline; Vitality leans on
         // resting HR, sleep duration + regularity, HRV-vs-age-norm, and steps.)
-        let vNights = fa7.compactMap { $0.totalSleepMin }.map { Double($0) / 60.0 }.filter { $0 > 0 }
-        let vHRVs = fa7.compactMap { $0.avgHrv }
-        let vSteps = fa7.compactMap { $0.steps }.map(Double.init)
-        let vInputs = VitalityEngine.Inputs(
-            chronoAge: Double(profile.age),
-            restingHR: faRHRs.isEmpty ? nil : IntelligenceEngine.medianOf(faRHRs),
-            sleepHours: vNights.isEmpty ? nil : vNights.reduce(0, +) / Double(vNights.count),
-            sleepConsistency: VitalityEngine.sleepConsistency(nightlyHours: vNights),
-            rmssd: vHRVs.isEmpty ? nil : IntelligenceEngine.medianOf(vHRVs),
-            rmssdNorm: VitalityEngine.rmssdNorm(forAge: Double(profile.age)),
-            steps: vSteps.isEmpty ? nil : vSteps.reduce(0, +) / Double(vSteps.count))
-        if let vRes = VitalityEngine.compute(vInputs) {
-            let satKey = IntelligenceEngine.saturdayKey(onOrBefore: newestDay)
-            _ = try? await store.upsertMetricSeries([
-                MetricPoint(day: satKey, key: "vitality", value: vRes.vitality),
-                MetricPoint(day: satKey, key: "body_age", value: vRes.bodyAge),
-            ], deviceId: computedId)
+        //
+        // BACKFILL (#metrics-ux WS-3a): the earlier build computed Vitality ONLY for the newest day's
+        // Saturday, so a fresh install with deep history showed a single hero point and no timeline.
+        // We now compute one point for EVERY historical Saturday from its own trailing-7-days window
+        // (Sun…Sat ending on that Saturday). The upsert is idempotent on the (Saturday, key) pair, so
+        // re-runs refine each week in place. Weeks with <3 inputs legitimately write nothing — the
+        // resulting gaps are honest (the chart renders gaps, never interpolates them).
+        let sortedDailies = dailies.sorted { $0.day < $1.day }
+        let allSaturdays = Set(sortedDailies.map { IntelligenceEngine.saturdayKey(onOrBefore: $0.day) })
+        var vitalityPts: [MetricPoint] = []
+        for satKey in allSaturdays {
+            // The 7-day window ending on this Saturday (its own week), taken by day-string comparison
+            // against the inclusive [satKey-6, satKey] range so it needs no per-row date parsing.
+            guard let weekStart = IntelligenceEngine.dayString(offsetDays: -6, from: satKey) else { continue }
+            let week = sortedDailies.filter { $0.day >= weekStart && $0.day <= satKey }
+            guard !week.isEmpty else { continue }
+            vitalityPts += IntelligenceEngine.vitalityPoints(week: week, satKey: satKey,
+                                                             chronoAge: Double(profile.age))
+        }
+        if !vitalityPts.isEmpty { _ = try? await store.upsertMetricSeries(vitalityPts, deviceId: computedId) }
+
+        // ── Acute:Chronic Workload Ratio (ACWR) on Effort (WS-4c) ───────────────────────────────────
+        // 7-day acute ÷ 28-day chronic mean daily Effort, computed per day, so Effort HISTORY reads as
+        // forward-looking guidance (ramping too fast > ~1.5 / balanced / detraining) rather than only a
+        // past-load chart. Rest days count as 0 load (the engine zero-fills gaps in-window). Idempotent
+        // on (day, "acwr"); days without enough chronic history legitimately write nothing.
+        let effortPoints = sortedDailies.compactMap { d in d.strain.map { (day: d.day, value: $0) } }
+        if !effortPoints.isEmpty {
+            var acwrPts: [MetricPoint] = []
+            for d in sortedDailies where d.strain != nil {
+                if let res = ACWREngine.ratio(points: effortPoints, endDay: d.day,
+                                              dayIndex: IntelligenceEngine.epochDayIndex) {
+                    acwrPts.append(MetricPoint(day: d.day, key: "acwr", value: res.ratio))
+                }
+            }
+            if !acwrPts.isEmpty { _ = try? await store.upsertMetricSeries(acwrPts, deviceId: computedId) }
         }
 
         // ── Steps ESTIMATE (WHOOP 4.0) , DAILY, keyed to each strap-only day ────────────────────────

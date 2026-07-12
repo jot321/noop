@@ -12,8 +12,12 @@ struct MetricDescriptor: Identifiable, Hashable {
     let decimals: Int
     let higherIsBetter: Bool?
     /// A short, plain-English one-liner for the metric (tile subtitle / catalog blurb). Optional —
-    /// only the three headline scores (Charge / Effort / Rest) carry one today; everything else is nil.
+    /// only the headline scores and the derived overnight metrics carry one; everything else is nil.
     var description: String? = nil
+    /// Display multiplier applied to the STORED value before formatting (e.g. 100 for the
+    /// fraction-stored overnight keys like `supine_frac`, so 0.42 renders as 42%). The chart,
+    /// stat tiles and tooltips all read the scaled series, so axis and labels agree. Default 1.
+    var displayScale: Double = 1
     var id: String { source + ":" + key }
 
     /// Human label for the metric's source partition (catalog row caption / detail subtitle).
@@ -169,6 +173,51 @@ enum MetricCatalog {
         // ── Mind (daily mood check-in, 1–5; non-clinical self-tracking)
         d("mood", String(localized: "Mood"), "Mind", "/5", "noop-mood", "face.smiling", 0, true),
 
+        // ── Derived overnight / recovery analytics (computed on-device by the advanced pass in
+        //    IntelligenceEngine; read through exploreSeries' computed layer). These already render
+        //    as single-value rows on the Sleep analytics card — listing them here makes them
+        //    TRENDABLE: full history, baseline band, stats, correlations. All APPROXIMATE and
+        //    non-clinical. Fraction-stored keys carry displayScale 100 so they read as %.
+        d("hrr60", String(localized: "HR Recovery (1 min)"), "Heart", "bpm", "my-whoop", "arrow.down.heart", 0, true,
+          String(localized: "How far your heart rate falls one minute after a workout ends. A strong longitudinal fitness marker.")),
+        d("hrr120", String(localized: "HR Recovery (2 min)"), "Heart", "bpm", "my-whoop", "arrow.down.heart.fill", 0, true,
+          String(localized: "Heart-rate drop two minutes after a workout ends.")),
+        d("nocturnal_dip", String(localized: "Overnight HR Dip"), "Rest", "%", "my-whoop", "moon.circle", 0, true,
+          String(localized: "How far your sleeping heart rate drops below daytime. ~10%+ is the healthy pattern; a blunted dip is worth watching."), scale: 100),
+        d("sleep_hr_mean", String(localized: "Sleeping Heart Rate"), "Rest", "bpm", "my-whoop", "heart.circle", 0, false),
+        d("sleep_hr_trough", String(localized: "Sleep HR Trough"), "Rest", "bpm", "my-whoop", "heart", 0, false,
+          String(localized: "The lowest point of your nightly heart-rate curve.")),
+        d("sleep_hr_trough_frac", String(localized: "HR Trough Timing"), "Rest", "%", "my-whoop", "clock", 0, false,
+          String(localized: "When your HR bottomed out (0% = sleep onset, 100% = wake). Earlier means recovery finished sooner."), scale: 100),
+        d("sleep_hr_amplitude", String(localized: "Overnight HR Range"), "Rest", "bpm", "my-whoop", "arrow.up.and.down", 0, nil),
+        d("sleep_hr_prewake_rise", String(localized: "Pre-wake HR Rise"), "Rest", "bpm/h", "my-whoop", "sunrise", 1, nil),
+        d("hrv_lfhf", String(localized: "Autonomic Balance"), "Charge", "LF/HF", "my-whoop", "waveform.path", 2, nil,
+          String(localized: "Sympathetic/parasympathetic balance overnight. >1 leans sympathetic, <1 parasympathetic.")),
+        d("hrv_rmssd_deep", String(localized: "HRV in Deep Sleep"), "Charge", "ms", "my-whoop", "waveform.path.ecg", 0, true),
+        d("hrv_rmssd_rem", String(localized: "HRV in REM"), "Charge", "ms", "my-whoop", "waveform.path.ecg", 0, true),
+        d("spo2_min", String(localized: "Lowest SpO₂"), "Charge", "%", "my-whoop", "drop", 0, true),
+        d("temp_amplitude", String(localized: "Skin-temp Swing"), "Rest", "Δ°C", "my-whoop", "thermometer", 2, nil,
+          String(localized: "Peak-to-trough of the nightly skin-temperature curve — a circadian-rhythm marker.")),
+        d("temp_nadir_frac", String(localized: "Temp Nadir Timing"), "Rest", "%", "my-whoop", "thermometer.low", 0, nil, nil, scale: 100),
+        d("temp_prewake_slope", String(localized: "Pre-wake Temp Slope"), "Rest", "°C/h", "my-whoop", "thermometer.sun", 2, nil),
+        d("odi", String(localized: "Desaturation Index"), "Rest", "/hr", "my-whoop", "drop.triangle", 1, false,
+          String(localized: "Oxygen drops of 3%+ per hour of sleep. A screening signal, not a diagnosis.")),
+        d("t90", String(localized: "Time Below 90% SpO₂"), "Rest", "%", "my-whoop", "drop.halffull", 1, false, nil, scale: 100),
+        d("ahi_est", String(localized: "Apnea Screen (est.)"), "Rest", "AHI", "my-whoop", "lungs", 0, false,
+          String(localized: "Estimated apnea-hypopnea index. A screening estimate against your own nights — never a diagnosis.")),
+        d("supine_frac", String(localized: "Time on Back"), "Rest", "%", "my-whoop", "bed.double", 0, nil, nil, scale: 100),
+        d("restless_frac", String(localized: "Restlessness"), "Rest", "%", "my-whoop", "wind", 0, false, nil, scale: 100),
+        d("position_changes", String(localized: "Position Changes"), "Rest", "", "my-whoop", "arrow.left.arrow.right", 0, false),
+
+        // Training-load & threshold analytics (WS-4c/4d). ACWR turns Effort history into forward-looking
+        // guidance; DFA-α1 is an EXPERIMENTAL lab-free aerobic/anaerobic-threshold proxy (self-hides on
+        // artifact-heavy wrist-PPG workouts). higherIsBetter is nil for both — the useful reading is the
+        // BAND / zone, not a monotonic "up good", so we don't tint a delta as improvement.
+        d("acwr", String(localized: "Training Load Ratio"), "Effort", "×", "my-whoop", "chart.line.uptrend.xyaxis", 2, nil,
+          String(localized: "Acute:chronic workload ratio — your last 7 days of Effort against your last 28. Around 1.0 is steady; much above ~1.5 means you're ramping fast.")),
+        d("dfa_a1", String(localized: "DFA-α1 (experimental)"), "Effort", "", "my-whoop", "waveform.path.ecg.rectangle", 2, nil,
+          String(localized: "An experimental HRV-based training-intensity marker from your workout beat-to-beat intervals. ~0.75 marks the aerobic threshold, ~0.5 the anaerobic. Needs clean data, so it only appears for steady, low-motion sessions.")),
+
         // ── Mi Band (imported from Mi Fitness). Same metricSeries mechanism as Apple Health /
         //    Nutrition, so these light up Explore, Compare and the correlation scan. Distinct
         //    `source` keeps them comparable against the WHOOP/Apple versions rather than colliding.
@@ -209,9 +258,10 @@ enum MetricCatalog {
 
     private static func d(_ key: String, _ title: String, _ category: String, _ unit: String,
                           _ source: String, _ icon: String, _ decimals: Int,
-                          _ higherIsBetter: Bool?, _ description: String? = nil) -> MetricDescriptor {
+                          _ higherIsBetter: Bool?, _ description: String? = nil,
+                          scale: Double = 1) -> MetricDescriptor {
         MetricDescriptor(key: key, title: title, category: category, unit: unit,
                          source: source, icon: icon, decimals: decimals, higherIsBetter: higherIsBetter,
-                         description: description)
+                         description: description, displayScale: scale)
     }
 }

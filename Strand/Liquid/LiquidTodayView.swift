@@ -106,6 +106,43 @@ struct LiquidTodayView: View {
     /// offset 0 (today); a navigated past day carries nothing (its own row is the whole story).
     private var vitalsDay: DailyMetric? { cachedVitalsDay }
 
+    /// Cold-start Charge calibration progress (WS-3c): how many of the seed nights of usable HRV are
+    /// banked up to the displayed day, so "Calibrating" carries a concrete "N of 4" count instead of
+    /// an opaque state. nil once Charge exists (the pill reads "Solid") or no usable HRV night exists
+    /// yet (still "Calibrating", 0 of N). Since HRV needs the R22 R-R stream, this clock only advances
+    /// once R22 is enabled — exactly the confusion the count resolves ("field hasn't come / is it broken?").
+    private var chargeCalibration: (n: Int, seed: Int)? {
+        guard displayDay?.recovery == nil else { return nil }
+        let upTo = displayDay?.day
+        let hrv: [Double?] = repo.days
+            .filter { upTo == nil || $0.day <= upTo! }
+            .map { $0.avgHrv }
+        let seed = Baselines.minNightsSeed
+        guard let n = RecoveryScorer.calibrationNights(nightlyHrv: hrv, hasRecovery: false, seed: seed) else {
+            return nil
+        }
+        return (n, seed)
+    }
+
+    /// The Charge status-pill text: the calibrating "N of 4" count while cold-starting, else Solid /
+    /// Calibrating. Whole-phrase variants so translators never see a stitched count.
+    private var chargeStatusText: String {
+        if let c = chargeCalibration { return String(localized: "Calibrating · \(c.n) of \(c.seed)") }
+        return displayDay?.recovery != nil ? String(localized: "Solid") : String(localized: "Calibrating")
+    }
+
+    /// A one-line "how close to your first Charge" note shown under the synthesis card while
+    /// calibrating (WS-3c). Whole-phrase variants per remaining-night count; nil once Charge exists.
+    private var chargeCalibrationNote: String? {
+        guard let c = chargeCalibration else { return nil }
+        let remaining = max(0, c.seed - c.n)
+        switch remaining {
+        case 0:  return String(localized: "Your first Charge unlocks after tonight's sleep.")
+        case 1:  return String(localized: "1 more night of HRV to your first Charge.")
+        default: return String(localized: "\(remaining) more nights of HRV to your first Charge.")
+        }
+    }
+
     /// The actual O(days) resolution. Offset 0 prefers live repo.today; past offsets look up. Run ONCE
     /// per data/day change from load(), never from body.
     private func resolveDisplayDay() -> DailyMetric? {
@@ -587,7 +624,7 @@ struct LiquidTodayView: View {
                     }
                     HStack(spacing: 5) {
                         Circle().fill(StrandPalette.chargeColor).frame(width: 6, height: 6)
-                        Text(displayDay?.recovery != nil ? "Solid" : "Calibrating")
+                        Text(chargeStatusText)
                             .font(StrandFont.caption.weight(.bold))
                             .foregroundStyle(StrandPalette.chargeColor)
                     }
@@ -621,6 +658,18 @@ struct LiquidTodayView: View {
                 }
             }
             .buttonStyle(LiquidPressStyle())
+
+            // While Charge is still cold-starting, a concrete "N more nights" note so a missing Charge
+            // reads as "still warming up" rather than "broken" (WS-3c).
+            if let note = chargeCalibrationNote {
+                HStack(spacing: 6) {
+                    Image(systemName: "hourglass").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(StrandPalette.chargeColor)
+                    Text(note).font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 2)
+            }
         }
     }
 

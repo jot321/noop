@@ -539,6 +539,51 @@ struct MetricDetailView: View {
 
     private var latest: (day: String, value: Double)? { series.last }
 
+    /// The personal-baseline band for the chart: the mean ± 1 SD of the trailing 60 readings,
+    /// so a point reads as inside / outside *your* normal rather than a population cutoff (the
+    /// interpretation the research calls for). Computed from the display-scaled `series`, so its
+    /// units match the plotted line. nil until there are ≥ 8 readings to make a band meaningful —
+    /// below that a "normal range" would be noise. Returns the band and its center line.
+    private var baselineBand: (band: ClosedRange<Double>, center: Double)? {
+        guard series.count >= 8 else { return nil }
+        let trailing = Array(series.suffix(60)).map(\.value)
+        let s = ComparisonEngine.stat(trailing)
+        guard s.stdev > 0 else { return nil }
+        let lo = s.mean - s.stdev
+        let hi = s.mean + s.stdev
+        return (lo...hi, s.mean)
+    }
+
+    /// A short "vs your normal" readout for the hero (WS-4a HRV / WS-4b RHR): the recent 7-reading
+    /// average against the personal-baseline center, as a signed percentage. This is what makes a score
+    /// legible against the research's "trend vs personal baseline, within ~10% normal" frame — e.g. HRV
+    /// reads "12% below your normal" instead of a bare number. nil without a band or enough recent points.
+    /// The colour reads the deviation's *direction* against `higherIsBetter` (a drop in HRV is a warning,
+    /// a drop in RHR is positive); neutral within the band or when the metric has no better-direction.
+    private var baselineStatus: (text: String, color: Color)? {
+        guard let b = baselineBand else { return nil }
+        let recent = Array(series.suffix(7)).map(\.value)
+        guard recent.count >= 3 else { return nil }
+        let mean = recent.reduce(0, +) / Double(recent.count)
+        let center = b.center
+        guard center != 0 else { return nil }
+        let pct = (mean - center) / abs(center) * 100
+        if abs(pct) < 10 {
+            return (String(localized: "In your normal range"), StrandPalette.textSecondary)
+        }
+        let mag = Int(abs(pct).rounded())
+        let text = pct > 0
+            ? String(localized: "\(mag)% above your normal")
+            : String(localized: "\(mag)% below your normal")
+        let color: Color
+        if let better = metric.higherIsBetter {
+            color = ((pct > 0) == better) ? StrandPalette.statusPositive : StrandPalette.statusWarning
+        } else {
+            color = StrandPalette.textSecondary
+        }
+        return (text, color)
+    }
+
     // MARK: Body
 
     var body: some View {
@@ -583,7 +628,12 @@ struct MetricDetailView: View {
     }
 
     private func load() async {
-        series = await repo.exploreSeries(key: metric.key, source: metric.source)
+        let raw = await repo.exploreSeries(key: metric.key, source: metric.source)
+        // Apply the descriptor's display multiplier once, at the source, so the chart, stat tiles,
+        // hero and correlation scan all read the SAME scaled series (e.g. the fraction-stored
+        // overnight keys render as %). Correlation is scale-invariant, so `others` stays raw.
+        let scale = metric.displayScale
+        series = scale == 1 ? raw : raw.map { (day: $0.day, value: $0.value * scale) }
         var loadedOthers: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
         for other in MetricCatalog.all where other.id != metric.id {
             let s = await repo.exploreSeries(key: other.key, source: other.source)
@@ -709,6 +759,18 @@ struct MetricDetailView: View {
                     .accessibilityLabel(rangeCaption(effectiveRange: effectiveRange,
                                                      windowed: windowed,
                                                      windowFellBack: windowFellBack))
+                // "Vs your normal" readout (WS-4a/4b): the recent average against the personal baseline
+                // band, so the headline reads as inside / outside YOUR normal, not a population cutoff.
+                if let status = baselineStatus {
+                    HStack(spacing: 6) {
+                        Image(systemName: "target").font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(status.color)
+                        Text(status.text).font(StrandFont.footnote.weight(.medium))
+                            .foregroundStyle(status.color)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(status.text)
+                }
                 // The subtle reason the dimmed chips exist (#943); shown only while some are locked.
                 // Byte-identical wording to the Android HealthScreen's unlock hint.
                 if hasLockedRanges {
@@ -786,6 +848,16 @@ struct MetricDetailView: View {
         let subtitle = windowFellBack
             ? String(localized: "Sparse, widened to \(effectiveRange.name) · \(windowed.count) readings")
             : String(localized: "\(windowed.count) readings · \(range.name)")
+        let band = baselineBand
+        // Fit the axis to the data AND the band, so the shaded normal range never clips off the top
+        // or bottom of the plot when today's readings sit inside a wider band.
+        let domain: ClosedRange<Double> = {
+            var r = valueRange(windowed.map(\.value))
+            if let b = band?.band {
+                r = min(r.lowerBound, b.lowerBound)...max(r.upperBound, b.upperBound)
+            }
+            return r
+        }()
         return ChartCard(
             title: "\(metric.title)",
             subtitle: subtitle,
@@ -795,18 +867,30 @@ struct MetricDetailView: View {
             TrendChart(
                 points: trendPoints(windowed),
                 gradient: metricGradient(metric),
-                valueRange: valueRange(windowed.map(\.value)),
+                valueRange: domain,
                 showsArea: true,
                 height: NoopMetrics.chartHeight,
-                valueFormat: { fmt($0) }
+                valueFormat: { fmt($0) },
+                baselineBand: band?.band,
+                baselineCenter: band?.center
             )
         } footer: {
-            ChartFooter([
-                ("Window", effectiveRange.label),
-                ("Points", "\(windowed.count)"),
-                ("Latest", heroValue),
-            ])
+            ChartFooter(footerItems(band: band, effectiveRange: effectiveRange,
+                                    windowed: windowed, heroValue: heroValue))
         }
+    }
+
+    /// The three ChartFooter chips: the middle one shows the personal-normal center when a
+    /// baseline band exists, else the plain point count. Typed explicitly so the string
+    /// literals resolve as `LocalizedStringKey`, not `String`.
+    private func footerItems(band: (band: ClosedRange<Double>, center: Double)?,
+                             effectiveRange: ExploreRange,
+                             windowed: [(day: String, value: Double)],
+                             heroValue: String) -> [(LocalizedStringKey, String)] {
+        let middle: (LocalizedStringKey, String) = band == nil
+            ? ("Points", "\(windowed.count)")
+            : ("Your normal", fmt(band!.center))
+        return [("Window", effectiveRange.label), middle, ("Latest", heroValue)]
     }
 
     // MARK: Stat tile row (uniform 104pt tiles)

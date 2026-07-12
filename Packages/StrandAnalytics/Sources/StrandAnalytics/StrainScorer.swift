@@ -177,6 +177,45 @@ public enum StrainScorer {
         return acc
     }
 
+    // MARK: - Effort coverage (the low-Effort explainer, WS-3b)
+
+    /// A transparent readout of WHAT the Effort score integrated over a day: how long we actually
+    /// saw heart rate, and how that time distributed across the Edwards zones. On a low-Effort day
+    /// this distinguishes *verified calm* ("14 h of HR, 0 min above 50% HRR") from *possibly missing
+    /// data*. Uses the EXACT per-sample durations and zone thresholds `strain(...)` integrates, so the
+    /// minutes reconcile with the headline. Pure.
+    public struct EffortCoverage: Equatable, Sendable {
+        /// Total minutes of HR the day integrated (sum of clamped per-sample durations).
+        public let coverageMinutes: Double
+        /// Minutes spent in each Edwards zone 1…5 (index 0 = zone 1, ≈ ≥50% HRR; index 4 = zone 5).
+        public let zoneMinutes: [Double]
+        /// Minutes at or above 50% HRR (any Edwards zone) — the "real effort" time.
+        public var activeMinutes: Double { zoneMinutes.reduce(0, +) }
+        public init(coverageMinutes: Double, zoneMinutes: [Double]) {
+            self.coverageMinutes = coverageMinutes; self.zoneMinutes = zoneMinutes
+        }
+    }
+
+    /// Compute the Effort coverage breakdown for a day's HR stream. `maxHR`/`restingHR` mirror
+    /// `strain(...)`; a nil maxHR falls back to 220 − defaultAge. Returns nil when HRR is invalid
+    /// (maxHR ≤ restingHR) or there are no samples.
+    public static func effortCoverage(_ hr: [HRSample], maxHR: Double? = nil,
+                                      restingHR: Double = defaultRestingHR) -> EffortCoverage? {
+        guard !hr.isEmpty else { return nil }
+        let effMax = maxHR ?? Double(defaultMaxHR())
+        guard effMax > restingHR else { return nil }
+        let hrReserve = effMax - restingHR
+        let durs = sampleDurationsMinutes(hr)
+        var zoneMin = [Double](repeating: 0, count: 5)
+        var coverage = 0.0
+        for (i, s) in hr.enumerated() {
+            coverage += durs[i]
+            let w = zoneWeight(Double(s.bpm), restingHR: restingHR, hrReserve: hrReserve)
+            if w >= 1 { zoneMin[w - 1] += durs[i] }
+        }
+        return EffortCoverage(coverageMinutes: coverage, zoneMinutes: zoneMin)
+    }
+
     // MARK: - Logarithmic map
 
     /// Map accumulated TRIMP onto [0, 100] via 100 × ln(TRIMP+1) / ln(D), 2 dp.
