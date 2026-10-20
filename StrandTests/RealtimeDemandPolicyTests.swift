@@ -324,6 +324,60 @@ final class RealtimeDemandPolicyTests: XCTestCase {
         )
     }
 
+    /// The July 2026 Live-HR bug: Live opened while a 5/MG was still connecting, and live HR never
+    /// started until the user left Live and came back. Live acquires its owner unbonded; nothing may be
+    /// planned or recorded until the bond lands, and the post-bond reconcile must then send the toggle.
+    func testWhoop5LiveOpenedBeforeBondArmsToggleOncePostBond() {
+        var owners = RealtimeOwnerCoordinator()
+        _ = owners.acquire(.liveScreen)
+        var sentState = RealtimeCommandSentState()
+        let wanted = demand(family: .whoop5, owners: owners.owners)
+        XCTAssertTrue(wanted.toggleWanted)
+
+        let preBond = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop5,
+            demand: wanted,
+            sentState: sentState,
+            connected: true,
+            bonded: false,
+            canSendWriteWithoutResponse: true
+        )
+        XCTAssertEqual(preBond, .none)
+        XCTAssertFalse(sentState.toggleArmed)
+
+        let postBond = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop5,
+            demand: wanted,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+        XCTAssertEqual(postBond, RealtimeCommandWritePlan(heavyWhoop4Wanted: nil, toggleWanted: true))
+        sentState.recordToggle(wanted: true, queued: true)
+
+        // Live's onChange(bonded) re-arm forces a resend; an unforced keep-alive pass does not.
+        let liveRearm = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop5,
+            demand: wanted,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true,
+            forceWantedCommands: true
+        )
+        XCTAssertEqual(liveRearm.toggleWanted, true)
+        let keepAlive = RealtimeCommandWritePlanner.plan(
+            deviceFamily: .whoop5,
+            demand: wanted,
+            sentState: sentState,
+            connected: true,
+            bonded: true,
+            canSendWriteWithoutResponse: true
+        )
+        XCTAssertEqual(keepAlive, .none)
+    }
+
     func testWhoop5ClearsHeavyStateWithoutPlanningWhoop4Command() {
         var sentState = RealtimeCommandSentState()
         sentState.recordHeavy(wanted: true, queued: true, at: Date())

@@ -201,20 +201,35 @@ rebuilding does not intentionally clear the database, but a full uninstall can r
 The tested connection completed `CLIENT_HELLO`, established an encrypted bond, enabled the standard
 heart-rate and battery notifications, synchronized the strap clock, and began historical offload.
 
-## Live HR Workaround
+## Live HR After Bonding
 
-Live HR should appear within seconds, not after several minutes. The current UI has a lifecycle edge
-case when the Live screen appears before bonding finishes: the screen can miss the command that arms
-realtime HR.
+On 10 Jul 2026 (00:26) the Live screen could open before a 5/MG finished bonding and then never arm
+realtime HR until the user left Live and came back. The July strap log shows no `Toggle Realtime HR`
+send after the bond. The cause was the old flag logic in `BLEManager`: separate
+`screenWantsRealtime` / `realtimeArmed` / `whoop5RealtimeArmed` flags could disagree, so the
+post-bond arm was skipped.
 
-Workaround:
+The realtime rework later that day (`0ca6d25`, `652a9e5`, `ff70856`) replaced those flags:
 
-1. Open another tab such as Today.
-2. Return to Live.
-3. Keep the strap on the wrist and wait 10-15 seconds.
+- Live owns a `.liveScreen` demand.
+- `RealtimeCommandWritePlanner` plans no 5/MG toggle until `bonded`.
+- `RealtimeCommandSentState` records a send only once CoreBluetooth queued it.
+- Both the post-bond reconcile and `LiveView`'s `onChange(bonded)` re-arm send the toggle.
 
-This workaround restored live HR during the installation session. The lifecycle bug has been
-diagnosed but not patched in this branch.
+`StrandTests/RealtimeDemandPolicyTests.testWhoop5LiveOpenedBeforeBondArmsToggleOncePostBond`
+pins that sequence. This section was written before the rework and wrongly said the bug was
+unpatched.
+
+On 20 Oct 2026, opening Live on a connected 5/MG sent `→ Toggle Realtime HR payload=01` and live HR
+appeared. The exact July order (Live already open while the strap reconnects) has not been
+re-tested on the phone. To test it: stay on Live, tap Disconnect, reconnect, and watch for HR without
+switching tabs.
+
+Known gap: on a 5/MG the number on Live comes from the puffin realtime stream, which is deliberately
+not persisted. Live HR/R-R is saved only from the standard 0x2A37 Heart Rate profile (logged as
+`HR notify: N bpm` every 30 s). On 20 Oct, during a long history backfill, no 0x2A37 readings
+arrived and no rows dated that day were saved, although Live showed HR. Whether 0x2A37 resumes
+after the backfill is still unchecked.
 
 ## Overnight Collection
 
