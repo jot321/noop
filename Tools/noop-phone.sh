@@ -6,10 +6,10 @@
 # database is kept), and tries to relaunch it. A launchd job runs `auto` a few times a day; it does
 # nothing until the profile is close to expiry.
 #
-# Phone access goes through pymobiledevice3 (house_arrest for the backup, installation_proxy for the
-# install). Both work over USB or the same Wi-Fi, with the phone locked, and without Xcode's developer
-# disk image, which only mounts while the phone is unlocked. The build targets generic iOS for the
-# same reason. Only the relaunch needs the developer disk image, so it is best effort.
+# The backup goes through pymobiledevice3 (house_arrest), which works over USB or the same Wi-Fi with
+# the phone locked. The install and relaunch use Xcode's devicectl, which installs over a running NOOP
+# but needs the developer disk image: that mounts only while the phone is unlocked and then stays
+# mounted until the next restart. The build targets generic iOS, so it needs no connected device.
 #
 # Everything the scheduled job touches lives in ~/.noop-phone, outside ~/Desktop, because macOS
 # privacy controls block background jobs from reading Desktop folders.
@@ -168,9 +168,65 @@ build() {
   log "Built NOOP build $APP_BUILD, profile expires $exp_raw"
 }
 
+# Run "$@" but give up after $1 seconds, killing the command and its children (uvx spawns python).
+run_with_timeout() {
+  local secs="$1"; shift
+  "$@" & local pid=$!
+  ( sleep "$secs"; pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null ) & local watchdog=$!
+  local rc=0
+  wait "$pid" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true   # reap quietly; bash would otherwise print "Terminated"
+  return $rc
+}
+
+# pymobiledevice3's installer hangs over a NOOP that has been running: installd waits for the app to
+# quit, iOS relaunches it within seconds via Bluetooth state restoration, and the stalled attempt leaves
+# a coordinated install that blocks every retry ("scoped to a different process") until NOOP has quit
+# and a few seconds pass (seen 2026-10-20). Xcode's devicectl installs over the running app in ~2 s, so
+# it is the primary path. It needs the developer disk image, which mounts only while the phone is
+# unlocked and then stays mounted until the next restart.
+noop_pids() {
+  local j; j=$(mktemp)
+  if xcrun devicectl device info processes --device "$DEVICE_UDID" --timeout 60 --json-output "$j" >/dev/null 2>&1; then
+    /usr/bin/python3 -c '
+import json, sys
+for p in json.load(open(sys.argv[1]))["result"]["runningProcesses"]:
+    if str(p.get("executable", "")).endswith("/NOOP.app/NOOP"):
+        print(p["processIdentifier"])
+' "$j" 2>/dev/null || true
+  fi
+  rm -f "$j"
+}
+
+# Last resort: stop NOOP, wait for iOS to drop any stalled install, then use pymobiledevice3.
+install_with_pmd3() {
+  local pid
+  for pid in $(noop_pids); do
+    xcrun devicectl device process terminate --device "$DEVICE_UDID" --pid "$pid" --timeout 60 >/dev/null 2>&1 &&
+      log "Stopped NOOP (pid $pid) before installing"
+  done
+  sleep 5
+  run_with_timeout 300 uvx --quiet "pymobiledevice3@$PMD3_VERSION" apps install --udid "$DEVICE_UDID" "$APP" >/dev/null 2>&1
+}
+
 install_app() {
   log "Installing over $BUNDLE_ID"
-  pmd3 apps install --udid "$DEVICE_UDID" "$APP" >/dev/null 2>&1 || die "install failed"
+  local out; out=$(mktemp)
+  if run_with_timeout 180 xcrun devicectl device install app --device "$DEVICE_UDID" --timeout 150 "$APP" > "$out" 2>&1 &&
+     grep -q "App installed" "$out"; then
+    rm -f "$out"
+  else
+    log "devicectl install failed: $(grep -m1 -E 'NSLocalizedFailureReason|ERROR' "$out" | sed 's/^ *//' | cut -c1-200)"
+    rm -f "$out"
+    if awk -v l="$(days_left)" 'BEGIN { exit !(l < 1) }'; then
+      log "Less than a day left; trying pymobiledevice3 as a last resort"
+      install_with_pmd3 || die "install failed; unlock the iPhone and run renew"
+    else
+      notify "NOOP needs renewing. Unlock your iPhone near the Mac; the next check retries."
+      die "install needs the iPhone unlocked once since its last restart (developer disk image); the next check retries"
+    fi
+  fi
   state_set EXPIRES_AT "$APP_EXPIRES"
   state_set INSTALLED_AT "$(date +%s)"
   state_set BUILD "$APP_BUILD"

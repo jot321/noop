@@ -25,11 +25,18 @@ VPN, disk-image and extension fixes.
   4. Check the bundle ID, and check that the new profile still lists this iPhone.
   5. Install over the existing app.
   6. Try to relaunch it.
-- Phone access uses pymobiledevice3 (`uvx pymobiledevice3@11.40.1`, nothing installed): house_arrest
-  for the backup and installation_proxy for the install. Both work over USB or the same Wi-Fi, with
-  the phone locked. Xcode's `devicectl` and device-destination builds are avoided because they need
-  the developer disk image, which mounts only while the phone is unlocked. Only the relaunch uses
-  `devicectl`, so it is best effort.
+- The backup uses pymobiledevice3 house_arrest (`uvx pymobiledevice3@11.40.1`, nothing installed),
+  which works over USB or the same Wi-Fi with the phone locked.
+- The install and relaunch use Xcode's `devicectl`. It installs over a running NOOP in about 2 s, but
+  it needs the developer disk image. The image mounts only while the phone is unlocked, then stays
+  mounted until the next restart. If it isn't mounted, the script notifies "Unlock your iPhone" and
+  retries at the next check. With less than a day left, it falls back to pymobiledevice3's installer
+  as a last resort.
+- Do not use pymobiledevice3's installer over a NOOP that has been running. installd waits for the
+  app to quit, but iOS relaunches it within seconds through Bluetooth state restoration. The install
+  hangs and leaves a coordinated install that blocks every later install ("A coordinated install
+  exists for this identity, but it's scoped to a different process"). It clears only after NOOP is
+  stopped and a few seconds pass. Seen 3 times on 2026-10-20.
 - A launchd job, `com.jot.noop-phone`, runs `~/.noop-phone/bin/noop-phone.sh auto` at 10:20, 13:20,
   16:20 and 19:20. It does nothing until fewer than 3 days remain on the 7-day profile. It then
   renews from `~/.noop-phone/src` (the last installed source, not the working tree). It sends a
@@ -225,11 +232,17 @@ appeared. The exact July order (Live already open while the strap reconnects) ha
 re-tested on the phone. To test it: stay on Live, tap Disconnect, reconnect, and watch for HR without
 switching tabs.
 
-Known gap: on a 5/MG the number on Live comes from the puffin realtime stream, which is deliberately
-not persisted. Live HR/R-R is saved only from the standard 0x2A37 Heart Rate profile (logged as
-`HR notify: N bpm` every 30 s). On 20 Oct, during a long history backfill, no 0x2A37 readings
-arrived and no rows dated that day were saved, although Live showed HR. Whether 0x2A37 resumes
-after the backfill is still unchecked.
+Live HR persistence on this strap (fixed 2026-10-20, `558e9b6`): this 5/MG never notifies the
+standard 0x2A37 Heart Rate profile. That was true in every July log, and it stays true with realtime
+armed and 0x2A37 subscribed. NOOP had saved 5/MG live HR/R-R only from 0x2A37, so Live showed HR
+but nothing live was stored, and Continuous HRV capture recorded nothing.
+
+The fix: `Whoop5LiveHRPersistence` now persists the puffin REALTIME_DATA frames (HR, R-R, real unix
+timestamp) whenever 0x2A37 has been silent for 10 s. 0x2A37 still wins whenever it flows, so a
+heartbeat is never stored twice. The fix also runs during a history backfill. The log line
+`0x2A37 HR silent — persisting live HR/R-R from REALTIME_DATA` confirms it is active.
+
+Verified on the phone: about 1 row per second dated that night, plus R-R intervals.
 
 ## Overnight Collection
 
