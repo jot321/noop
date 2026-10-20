@@ -136,14 +136,11 @@ struct LiquidSky: View {
 /// atmosphere carries across EVERY tab. Same live sky as Today at a modest header height, so the
 /// charts/cards below sit on the dark canvas — the redesign's "the options change, not the page"
 /// feel. Non-interactive + accessibility-hidden (pure decoration).
+/// Minimal redesign (2026-10-21): screens sit on the flat canvas. The dark sky header made dark titles
+/// unreadable at night and is gone; `height` is kept so call sites compile.
 func liquidScaffoldSky(height: CGFloat = 240) -> AnyView {
-    AnyView(
-        LiquidSkyStatic(hour: nil)
-            .frame(maxWidth: .infinity)
-            .frame(height: height, alignment: .top)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-    )
+    _ = height
+    return AnyView(Color.clear.frame(height: 0).accessibilityHidden(true))
 }
 
 /// A STATIC time-of-day sky, rendered ONCE (no TimelineView → CoreAnimation caches it as a stable layer,

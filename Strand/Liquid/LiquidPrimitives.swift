@@ -7,6 +7,7 @@
 //  one shared tilt source. Colours come from StrandDesign tokens at the call site.
 
 import SwiftUI
+import StrandDesign
 
 // MARK: - Renderers (pure GraphicsContext drawing)
 
@@ -299,12 +300,10 @@ struct LiquidVessel: View {
     }
 
     /// One-shot, cached render — posed at the fill line, no clock, no motion acquire.
+    /// Minimal redesign (2026-10-21): the still gauge is a flat score ring, not a posed glossy vessel.
     private var staticGauge: some View {
-        Canvas { context, size in
-            LiquidRender.vessel(context, size, LiquidSim.posed(value ?? 0), now: 0, tint: tint)
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .contentShape(Circle())
+        MinimalRing(value: value, tint: tint)
+            .contentShape(Circle())
     }
 }
 
@@ -343,19 +342,17 @@ struct LiquidTube: View {
         .onDisappear { LiquidMotion.shared.release() }
     }
 
+    /// Minimal redesign: a flat capsule bar.
     private var staticTube: some View {
-        Canvas { context, size in
-            LiquidRender.tube(context, size, LiquidSim.posed(frac), now: 0,
-                              frac: max(0, min(1, frac)), tint: tint)
-        }
-        .frame(height: height)
+        MinimalBar(frac: frac, tint: tint, height: max(4, height * 0.6))
+            .frame(height: height)
     }
 }
 
 /// The live heart-rate thread. `bpm` is the recent series (any length ≥ 2).
 struct LiquidThread: View {
     let bpm: [Double]
-    var tint: Color = Color(.sRGB, red: 1, green: 107/255, blue: 129/255, opacity: 1)
+    var tint: Color = StrandPalette.accent
     var height: CGFloat = 96
     var animated: Bool = true
 
@@ -383,11 +380,10 @@ struct LiquidThread: View {
     }
 
     /// One-shot render (no travelling glint / pulse) — used until first data load settles.
+    /// Minimal redesign: a plain line with an end dot (no glint, no pulse).
     private var staticThread: some View {
-        Canvas { context, size in
-            LiquidRender.thread(context, size, values: bpm, now: 0, tint: tint)
-        }
-        .frame(height: height)
+        MinimalLine(values: bpm, tint: tint)
+            .frame(height: height)
     }
 }
 

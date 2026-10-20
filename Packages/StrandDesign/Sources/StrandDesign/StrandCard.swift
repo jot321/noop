@@ -15,7 +15,7 @@ public extension View {
     /// wash + border bias; nil uses the flat raised surface with no wash.
     func frostedCardSurface(
         tint: Color? = nil,
-        cornerRadius: CGFloat = 22,
+        cornerRadius: CGFloat = 16,
         washStrength: Double = 1.0
     ) -> some View {
         background(FrostedCardSurface(tint: tint, cornerRadius: cornerRadius, washStrength: washStrength))
@@ -31,7 +31,7 @@ public struct FrostedCardSurface: View {
     public var washStrength: Double
     @Environment(\.colorScheme) private var scheme
 
-    public init(tint: Color? = nil, cornerRadius: CGFloat = 22, washStrength: Double = 1.0) {
+    public init(tint: Color? = nil, cornerRadius: CGFloat = 16, washStrength: Double = 1.0) {
         self.tint = tint
         self.cornerRadius = cornerRadius
         self.washStrength = washStrength
@@ -45,32 +45,12 @@ public struct FrostedCardSurface: View {
         // Design Reset: a flat raised fill reads cleaner than the navy bevel gradient. Tinted and
         // neutral cards now share the same flat surface; tint identity is carried by the softened
         // hue wash + the tinted hairline below, not a gradient, so cards stay familiar but flatten.
-        let baseFill = AnyShapeStyle(StrandPalette.surfaceRaised)
-        shape
-            .fill(baseFill)
-            .overlay(
-                // A faint per-domain hue wash — only on tinted cards; neutral stays flat.
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            (tint ?? .clear).opacity(0.05 * washStrength),
-                            (tint ?? .clear).opacity(0.015 * washStrength),
-                            .clear
-                        ],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    )
-                )
-            )
-            // Liquid redesign (2026-07-02): a 1px resting hairline in BOTH themes so every card
-            // matches the liquid home card's edge (LiquidTodayView.card), not just fill contrast.
-            .overlay(shape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
-            // LIGHT raises white cards off the warm-paper canvas with a soft resting drop shadow; DARK
-            // stays flat (the hairline + fill carry the edge, matching the home card which has no shadow).
-            .shadow(
-                color: scheme == .light ? Color(hex: "#1A2230").opacity(0.11) : .clear,
-                radius: scheme == .light ? 10 : 0,
-                x: 0, y: scheme == .light ? 3 : 0
-            )
+        // Minimal (2026-10-21): a flat tile — surface fill and a 0.5pt hairline. No tint wash, no shadow.
+        // `tint`, `washStrength` and `scheme` stay in the API so call sites compile unchanged.
+        _ = (tint, washStrength, scheme)
+        return shape
+            .fill(StrandPalette.surfaceRaised)
+            .overlay(shape.strokeBorder(StrandPalette.hairline, lineWidth: 0.5))
     }
 }
 
@@ -90,7 +70,7 @@ public struct StrandCard<Content: View>: View {
 
     public init(
         padding: CGFloat = 16,
-        cornerRadius: CGFloat = 22,
+        cornerRadius: CGFloat = 16,
         tint: Color? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
@@ -123,29 +103,10 @@ public struct StrandCardHover: ViewModifier {
     }
 
     public func body(content: Content) -> some View {
-        content
-            // Hover emphasis: brighten the hairline edge (the frosted surface owns the
-            // resting border) and add the mandated lift (shadow + translateY(-1px)).
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(StrandPalette.hairlineStrong, lineWidth: 1)
-                    .opacity(hovering ? 1 : 0)
-            )
-            // Incremental hover lift on top of the surface's resting elevation: a warm soft shadow on
-            // light (the white card lifts off the paper), the signature black on dark.
-            .shadow(
-                color: hovering ? (scheme == .light ? Color(hex: "#1A2230").opacity(0.16)
-                                                     : Color.black.opacity(0.45)) : .clear,
-                radius: hovering ? (scheme == .light ? 14 : 16) : 0,
-                x: 0,
-                y: hovering ? (scheme == .light ? 6 : 10) : 0
-            )
-            .offset(y: hovering ? -1 : 0)
-            .animation(StrandMotion.interactive, value: hovering)
-            // .onHover is unavailable on watchOS (no pointer); the watch never hovers a card.
-            #if !os(watchOS)
-            .onHover { hovering = $0 }
-            #endif
+        // Minimal (2026-10-21): no hover lift, shadow or press offset. The modifier stays so call
+        // sites compile; it is a no-op on every platform.
+        _ = (cornerRadius, hovering, scheme)
+        return content
     }
 }
 

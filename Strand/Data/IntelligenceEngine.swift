@@ -269,7 +269,7 @@ final class IntelligenceEngine: ObservableObject {
     }
 
     /// UserDefaults flag guarding the one-shot rescore after the October 2026 calculation fixes (below).
-    static let auditRescoreFlagKey = "intelligence.auditRescore.v20261021.done"
+    static let auditRescoreFlagKey = "intelligence.auditRescore.v20261021b.done"
 
     /// One-shot full-history rescore after the October 2026 calculation fixes: recovery against prior
     /// nights only (A1), naps on their own day (A2), adjacent-beat rMSSD (A6), capped steps (A12) and
@@ -1058,6 +1058,12 @@ final class IntelligenceEngine: ObservableObject {
             _ = try? await store.deleteDailyMetrics(deviceId: computedId, from: stale.day, to: stale.day)
         }
         if !restPoints.isEmpty { _ = try? await store.upsertMetricSeries(restPoints, deviceId: computedId) }
+        // The daily rows are reconciled above, but the Rest series is upsert-only: a night that no longer
+        // scores (e.g. the phantom nap nights, audit A2) kept its old Rest point, which Today's Rest and
+        // the Compare overlay still read. Drop the window's Rest points this pass didn't produce.
+        _ = try? await store.deleteMetricSeries(deviceId: computedId, keys: ["sleep_performance"],
+                                                from: oldestDay, to: newestDay,
+                                                keepingDays: Set(restPoints.map(\.day)))
 
         // ── Advanced analytics (docs/ADVANCED_ANALYTICS_PLAN.md) ─────────────────────────────────────
         // Second, purely-additive pass over the nights just scored. For each night's in-bed window we
