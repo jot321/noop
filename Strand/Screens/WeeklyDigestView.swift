@@ -449,7 +449,8 @@ private struct DigestScoreCard: View {
     }
     /// "of 100" for the genuine 0–100 scores; the Effort card follows the scale toggle ("of 100"/"of 21").
     private var captionText: String {
-        isEffort ? String(localized: "of \(UnitFormatter.effortScaleMax(effortScale))") : String(localized: "of 100")
+        guard summary.thisWeek.n > 0 else { return String(localized: "no data") }
+        return isEffort ? String(localized: "of \(UnitFormatter.effortScaleMax(effortScale))") : String(localized: "of 100")
     }
 
     var body: some View {
@@ -476,7 +477,8 @@ private struct DigestScoreCard: View {
                     supporting: nil,
                     diameter: 118,
                     lineWidth: 11,
-                    showsLabel: summary.thisWeek.n > 0,
+                    // Always labelled: an empty week reads "— no data" rather than a bare ring.
+                    showsLabel: true,
                     animatedFraction: animatedFraction
                 )
                 .frame(maxWidth: .infinity)

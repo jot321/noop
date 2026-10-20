@@ -126,11 +126,13 @@ struct CompareView: View {
 
     // Distinct, high-legibility series colors (avoid the recovery/strain ramps so
     // overlay lines read as categorical, not as a value gradient).
+    // Minimal palette (2026-10-21): series differ by lightness, not hue: the accent blue, a light grey,
+    // a mid grey and a pale blue, so up to four lines stay apart without a rainbow.
     private static let seriesPalette: [Color] = [
-        StrandPalette.accent,        // mint-green
-        StrandPalette.metricCyan,    // cyan
-        StrandPalette.metricPurple,  // purple
-        StrandPalette.metricAmber,   // amber
+        StrandPalette.accent,        // accent blue
+        StrandPalette.metricPurple,  // light grey (minimal theme)
+        StrandPalette.metricRose,    // mid grey (minimal theme)
+        StrandPalette.metricAmber,   // pale blue (minimal theme)
     ]
 
     /// Default starter selection (falls back gracefully if a key is missing).
@@ -419,14 +421,6 @@ struct CompareView: View {
         VStack(spacing: 0) {
             ForEach(Array(series.enumerated()), id: \.element.id) { idx, s in
                 HStack(spacing: 10) {
-                    // A small liquid vessel posed at this series' LATEST value within its own min–max
-                    // window (the same 0–1 position the overlay's "now" end-cap sits at) — the liquid
-                    // accent tying the legend to the real series. Static, decorative (the min/max text
-                    // + colour swatch carry the meaning for VoiceOver).
-                    LiquidVessel(value: s.rows.last.map { s.normalized($0.value) },
-                                 tint: s.color, animated: false)
-                        .frame(width: 22, height: 22)
-                        .accessibilityHidden(true)
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
                         .fill(s.color)
                         .frame(width: 14, height: 3)
@@ -435,7 +429,7 @@ struct CompareView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     // Real min/max labels honour the Effort scale (#268); other metrics are unchanged.
-                    Text("\(s.metric.format(s.realMin, effortScale: effortScale))-\(s.metric.format(s.realMax, effortScale: effortScale))")
+                    Text("\(s.metric.format(s.realMin, effortScale: effortScale)) – \(s.metric.format(s.realMax, effortScale: effortScale))")
                         .font(StrandFont.captionNumber)
                         .foregroundStyle(StrandPalette.textSecondary)
                 }
@@ -888,11 +882,7 @@ private struct OverlayChart: View {
                     if let px = proxy.position(forX: cap.date),
                        let py = proxy.position(forY: cap.norm),
                        let color = colorFor(cap.title) {
-                        ZStack {
-                            Circle().fill(color.opacity(0.30)).frame(width: 16, height: 16)
-                            Circle().fill(color.opacity(0.65)).frame(width: 10, height: 10)
-                            Circle().fill(Color.white).frame(width: 4, height: 4)
-                        }
+                        Circle().fill(color).frame(width: 7, height: 7)
                         .position(x: px + plot.minX, y: py + plot.minY)
                         .allowsHitTesting(false)
                     }
