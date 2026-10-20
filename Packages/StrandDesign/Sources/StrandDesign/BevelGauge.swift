@@ -74,18 +74,12 @@ public struct BevelGauge: View {
     private var gradient: Gradient { Gradient(stops: stops) }
 
     public var body: some View {
+        // Minimal redesign (2026-10-21): a flat full ring in one colour — no frosted disc, gradient arc,
+        // end-cap or bloom. The API is unchanged so every call site keeps working.
         ZStack {
-            // STATIC BACKDROP: the frosted inner disc + the faint full-span track. Neither depends on
-            // `animatedFraction`, so SwiftUI/CoreAnimation already caches it as an unchanged layer and
-            // does NOT re-render it when only the arc animates. No .drawingGroup() — a per-instance
-            // offscreen flatten cost more than it saved (it was part of the v7.0.2 lag regression).
-            staticBackdrop
+            MinimalRing(value: fraction, tint: tipColor,
+                        lineWidthFraction: max(0.05, min(0.12, lineWidth / max(1, diameter))))
                 .frame(width: diameter, height: diameter)
-
-            // LIVE LAYER: the gradient progress arc + end-cap, kept OUTSIDE the drawingGroup so the
-            // shape's `animatableData` still animates smoothly (a drawingGroup would freeze it).
-            animatedArc
-
             if showsLabel { centerLabel }
         }
         .frame(width: diameter, height: diameter)

@@ -282,7 +282,7 @@ public struct OverviewHRChart: View {
 
         ForEach(displayPoints) { p in
             AreaMark(x: .value("Time", p.date), y: .value("BPM", p.value))
-                .interpolationMethod(.catmullRom)
+                .interpolationMethod(.monotone)
                 .foregroundStyle(
                     LinearGradient(
                         colors: [
@@ -295,7 +295,7 @@ public struct OverviewHRChart: View {
         }
         ForEach(displayPoints) { p in
             LineMark(x: .value("Time", p.date), y: .value("BPM", p.value))
-                .interpolationMethod(.catmullRom)
+                .interpolationMethod(.monotone)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                 .foregroundStyle(valueGradient)
         }

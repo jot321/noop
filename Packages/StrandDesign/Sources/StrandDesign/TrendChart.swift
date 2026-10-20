@@ -164,6 +164,9 @@ public struct TrendChart: View {
     }
 
     // A vertical gradient keyed to the value axis so the stroke color tracks value.
+    /// The single line colour: the top of the series' own ramp (with the minimal palette, its accent).
+    private var lineColor: Color { StrandPalette.sample(stops: gradient.toStops(), at: 1.0) }
+
     private var valueGradient: LinearGradient {
         LinearGradient(gradient: gradient, startPoint: .bottom, endPoint: .top)
     }
@@ -198,16 +201,9 @@ public struct TrendChart: View {
                         x: .value("Date", p.date),
                         y: .value("Value", p.value)
                     )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                StrandPalette.sample(stops: gradient.toStops(), at: unit(averageValue)).opacity(0.28),
-                                Color.clear
-                            ],
-                            startPoint: .top, endPoint: .bottom
-                        )
-                    )
+                    // Minimal redesign: monotone (no overshoot past the data) and a faint flat wash.
+                    .interpolationMethod(.monotone)
+                    .foregroundStyle(lineColor.opacity(0.10))
                 }
             }
             ForEach(displayPoints) { p in
@@ -215,9 +211,11 @@ public struct TrendChart: View {
                     x: .value("Date", p.date),
                     y: .value("Value", p.value)
                 )
-                .interpolationMethod(.catmullRom)
-                .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                .foregroundStyle(valueGradient)
+                // Monotone: a smoothed curve that never invents peaks or dips between sparse points
+                // (catmull-rom did). One flat colour instead of a value gradient.
+                .interpolationMethod(.monotone)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .foregroundStyle(lineColor)
             }
             // 18pt dots are invisible on dense series (e.g. a 365-day year) but still cost the
             // GPU a mark each — hide them past a threshold; the line carries the data there. The gate
@@ -228,8 +226,8 @@ public struct TrendChart: View {
                         x: .value("Date", p.date),
                         y: .value("Value", p.value)
                     )
-                    .symbolSize(18)
-                    .foregroundStyle(StrandPalette.sample(stops: gradient.toStops(), at: unit(p.value)))
+                    .symbolSize(14)
+                    .foregroundStyle(lineColor)
                 }
             }
         }
@@ -245,14 +243,14 @@ public struct TrendChart: View {
         .chartPlotStyle { plotArea in plotArea.clipped() }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.6))
                 AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
                     .font(StrandFont.footnote)
             }
         }
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.6))
                 AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
                     .font(StrandFont.footnote)
             }

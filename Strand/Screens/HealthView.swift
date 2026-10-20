@@ -425,7 +425,7 @@ private struct LiveTimeChart: View {
                 x: .value("Time", s.date),
                 y: .value("BPM", s.bpm)
             )
-            .interpolationMethod(.catmullRom)
+            .interpolationMethod(.monotone)
             .foregroundStyle(
                 LinearGradient(
                     colors: [areaTint.opacity(0.24), Color.clear],
@@ -437,7 +437,7 @@ private struct LiveTimeChart: View {
                 x: .value("Time", s.date),
                 y: .value("BPM", s.bpm)
             )
-            .interpolationMethod(.catmullRom)
+            .interpolationMethod(.monotone)
             .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
             .foregroundStyle(lineGradient)
         }

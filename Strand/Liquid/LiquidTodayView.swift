@@ -29,6 +29,7 @@ struct LiquidTodayView: View {
     // async-loaded via the confirmed Repository accessors
     @State private var restScore: Double?          // sleep_performance, day-keyed
     @State private var stress: Double?             // StressModel(...).score, 0–3
+    @State private var stressDay: String?          // the day that score describes (StressModel.asOfDay)
     @State private var fitnessAge: Double?         // exploreSeries("fitness_age").last
     @State private var vitality: Double?           // exploreSeries("vitality").last
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
@@ -737,7 +738,8 @@ struct LiquidTodayView: View {
                     MinimalLine(values: weekResp, minSpan: 2)
                 }
                 tile("Stress", stressWord, "", caption: "Today") {
-                    MinimalBar(frac: (stress ?? 0) / 3, height: 6).padding(.top, 14)
+                    MinimalBar(frac: stressDay == selectedDayKey ? (stress ?? 0) / 3 : 0, height: 6)
+                        .padding(.top, 14)
                 }
             }
             NavigationLink { MetricExplorerView() } label: {
@@ -798,8 +800,10 @@ struct LiquidTodayView: View {
         return "\(Int((m * 100).rounded()))% efficient"
     }
 
+    /// Stress for the selected day only: the model's score describes its newest day with a signal,
+    /// which can be weeks old, and must not be shown as this day's.
     private var stressWord: String {
-        guard let v = stress else { return "–" }
+        guard let v = stress, stressDay == selectedDayKey else { return "–" }
         switch v { case ..<1: return "Calm"; case ..<2: return "Moderate"; default: return "High" }
     }
 
@@ -958,15 +962,17 @@ struct LiquidTodayView: View {
         // history doesn't stutter the UI. Snapshot the inputs (value types) into the detached task.
         let storedStress = await stressA
         let daysSnapshot = repo.days
-        let newStress = await Task.detached(priority: .utility) {
-            StressModel(days: daysSnapshot, stored: storedStress)?.score
+        let stressModel = await Task.detached(priority: .utility) {
+            StressModel(days: daysSnapshot, stored: storedStress).map { (score: $0.score, day: $0.asOfDay) }
         }.value
+        let newStress = stressModel?.score
 
         restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         restLast = restSeries.last.map { (day: $0.day, value: $0.value) }
         stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         stepsLast = stepsSeries.last?.value
         stress = newStress
+        stressDay = stressModel?.day
         fitnessAge = newFitnessAge
         vitality = newVitality
         workouts = newWorkouts
@@ -1037,7 +1043,10 @@ struct LiquidTodayView: View {
 
     // One decimal, matching StressView: integer rounding on the 0–3 scale misreads the 1.5
     // baseline as "2" (the HIGH-band floor).
-    private var stressText: String { stress.map { String(format: "%.1f", $0) } ?? "Calibrating" }
+    private var stressText: String {
+        guard stressDay == selectedDayKey else { return stress == nil ? "Calibrating" : "–" }
+        return stress.map { String(format: "%.1f", $0) } ?? "Calibrating"
+    }
 
     private var sleepText: String {
         guard let m = displayDay?.totalSleepMin else { return "–" }

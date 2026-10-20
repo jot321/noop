@@ -312,6 +312,23 @@ struct TrendsView: View {
         return off
     }
 
+    /// The `weekOffset` of the newest week that holds data, so the stepper opens on a real review instead
+    /// of an empty "This week" when the latest readings are older. 0 when this week has data. (2026-10-21)
+    private var latestDataWeekOffset: Int {
+        // The newest day with a SCORE: the newest row is often today's still-forming day with none.
+        guard let latest = repo.days.last(where: { $0.recovery != nil || $0.strain != nil || $0.totalSleepMin != nil })?.day,
+              let latestMon = WeeklyDigestEngine.mondayOfWeek(containing: latest),
+              let thisMon = WeeklyDigestEngine.mondayOfWeek(containing: Repository.localDayKey(Date()))
+        else { return 0 }
+        var off = 0
+        var mon = thisMon
+        while mon > latestMon && off > -520 {
+            mon = WeeklyDigestEngine.addDays(mon, -7)
+            off -= 1
+        }
+        return off
+    }
+
     /// The anchor day (any day in the target week) for the current `weekOffset`: today shifted back by
     /// `weekOffset` whole weeks. The engine snaps it to that week's Monday.
     private var weekAnchorDay: String {
@@ -339,6 +356,10 @@ struct TrendsView: View {
         } else {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 weekNavBar
+                    .onAppear {
+                        // Open on the newest week with readings rather than an empty current week.
+                        if weekOffset == 0, digest.isEmpty { weekOffset = max(minWeekOffset, latestDataWeekOffset) }
+                    }
                 if digest.isEmpty {
                     // This particular week had no readings — keep the chevrons above so the user can move on.
                     DataPendingNote(
@@ -409,7 +430,8 @@ struct TrendsView: View {
         if chargeAvg != nil || effortAvg != nil || restAvg != nil {
             NoopCard(tint: StrandPalette.chargeColor) {
                 VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                    SectionHeader("Week in review", overline: "Charge · Effort · Rest")
+                    // Averages over the range picked below (not the week above), so it gets its own title.
+                    SectionHeader("Averages", overline: "Charge · Effort · Rest")
                     if let v = chargeAvg {
                         pipScoreRow(label: "Charge", value: v, range: 0...100,
                                     tint: StrandPalette.chargeColor, frac: v / 100,

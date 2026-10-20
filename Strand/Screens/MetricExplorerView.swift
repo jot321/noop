@@ -162,6 +162,11 @@ struct MetricExplorerView: View {
     /// hint in the header, never gating the rows: the catalog is static, so every row's label/icon/unit
     /// must paint immediately even before any series read returns (#199).
     @State private var probing = true
+    /// Metrics confirmed empty are hidden until the user asks for them (minimal redesign, 2026-10-21):
+    /// the full catalog listed every source (WHOOP import, Apple Health, Mi Band…) whether or not it held
+    /// any data, burying the metrics that do.
+    @State private var showEmpty = false
+    private var emptyCount: Int { emptyByID.values.filter { $0 }.count }
 
     var body: some View {
         #if os(macOS)
@@ -215,7 +220,7 @@ struct MetricExplorerView: View {
             .padding(.bottom, NoopMetrics.sectionGap - 20)
 
             ForEach(MetricCatalog.categories, id: \.self) { category in
-                let metrics = MetricCatalog.inCategory(category)
+                let metrics = MetricCatalog.inCategory(category).filter { showEmpty || emptyByID[$0.id] != true }
                 if !metrics.isEmpty {
                     VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                         // Localized at the render site only; `category` itself stays the raw
@@ -256,6 +261,18 @@ struct MetricExplorerView: View {
                     }
                     .padding(.bottom, NoopMetrics.sectionGap - 20)
                 }
+            }
+
+            if !probing, emptyCount > 0 {
+                Button { showEmpty.toggle() } label: {
+                    Text(showEmpty ? "Hide metrics without data"
+                                   : "Show \(emptyCount) metrics without data")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.accent)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
             }
         }
         // Rows push MetricDetailView directly (closure-based NavigationLink above) — no value/destination

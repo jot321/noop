@@ -96,8 +96,10 @@ struct MindSection: View {
         return Button {
             select(value)
         } label: {
+            // Emoji need the system font: the house numeric font has no emoji fallback, so these
+            // rendered as missing-glyph boxes. (2026-10-21)
             Text(MoodStore.face(for: value))
-                .font(StrandFont.number(24))
+                .font(.system(size: 24))
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
                 .background(Capsule().fill(
@@ -116,7 +118,7 @@ struct MindSection: View {
     private func answeredRow(_ mood: Int) -> some View {
         HStack(spacing: NoopMetrics.gap) {
             Text(MoodStore.face(for: mood))
-                .font(StrandFont.number(24))
+                .font(.system(size: 24))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Today's mood").strandOverline()

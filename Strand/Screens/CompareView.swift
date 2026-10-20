@@ -864,7 +864,7 @@ private struct OverlayChart: View {
                 x: .value("Date", p.date),
                 y: .value("Normalized", p.norm)
             )
-            .interpolationMethod(.catmullRom)
+            .interpolationMethod(.monotone)
             .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
             .foregroundStyle(by: .value("Metric", p.title))
 

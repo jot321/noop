@@ -152,7 +152,7 @@ struct StressView: View {
 
             // 2. Today's numbers — uniform tiles in one grid.
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader("Today", overline: "Markers", trailing: String(localized: "vs 30-day baseline"))
+                SectionHeader("\(model.asOfTitle)", overline: "Markers", trailing: String(localized: "vs 30-day baseline"))
                 tileGrid(model)
             }
             .staggeredAppear(index: 1)
@@ -565,7 +565,7 @@ struct StressView: View {
     // MARK: Empty state
 
     private var emptyState: some View {
-        ComingSoon(what: "No stress history yet. Import your WHOOP export in Data Sources to see it.")
+        ComingSoon(what: "Stress builds from your resting heart rate and HRV. It appears after a few nights of sleep data from your strap.")
     }
 }
 
@@ -627,11 +627,12 @@ enum StressBand {
         }
     }
 
+    /// Minimal redesign: only HIGH carries a status colour; low reads neutral, medium the accent.
     var tone: StrandTone {
         switch self {
-        case .low:    return .positive
-        case .medium: return .warning
-        case .high:   return .critical
+        case .low:    return .neutral
+        case .medium: return .accent
+        case .high:   return .warning
         }
     }
 }
@@ -648,9 +649,10 @@ enum StressRamp {
     /// Band anchors, lifted from the shared palette (no hard-coded hex). These are the
     /// blue / green / amber the totals legend and band dots use, kept in lock-step with
     /// the gauge gradient below.
-    static let calm    = StrandPalette.accent         // #60A0E0 — calm WHOOP blue
-    static let steady  = StrandPalette.statusPositive // #03E095 — balanced WHOOP green
-    static let tense   = StrandPalette.statusWarning  // #F0A020 — high WHOOP amber
+    // Minimal redesign: one hue, light → full → bright accent, instead of blue → green → amber.
+    static let calm    = StrandPalette.sleepLight
+    static let steady  = StrandPalette.accent
+    static let tense   = StrandPalette.restBright
 
     /// The 3-stop gauge ramp, evenly spaced (blue → green → amber).
     static let stops: [Gradient.Stop] = [
@@ -703,9 +705,29 @@ struct StressModel {
     let calmTimeValue: String    // e.g. "58%"
     let calmTimeCaption: String  // e.g. "of last 30 days"
     let usingStored: Bool        // true when today's value came from the stored series
+    let asOfDay: String          // the day the headline score describes (newest day with a signal)
 
     /// Last up-to-14 trend values, for the hero tile sparkline.
     var sparkValues: [Double] { Array(fullTrend.suffix(14)).map(\.value) }
+
+    /// "Today" when the score describes today; otherwise "Latest · 16 Jul", so an old night is never
+    /// presented as today's.
+    var asOfTitle: String {
+        if asOfDay == Self.localDayKey.string(from: Date()) { return String(localized: "Today") }
+        guard let d = Self.dayParser.date(from: asOfDay) else { return String(localized: "Latest") }
+        return String(localized: "Latest · \(Self.shortDay.string(from: d))")
+    }
+
+    /// Today's key on the local clock (the day keys are local days; `dayParser` reads them as UTC dates).
+    private static let localDayKey: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f
+    }()
+
+    /// Formats a `dayParser` (UTC) date back to its own calendar day.
+    private static let shortDay: DateFormatter = {
+        let f = DateFormatter(); f.timeZone = TimeZone(identifier: "UTC")
+        f.setLocalizedDateFormatFromTemplate("d MMM"); return f
+    }()
 
     private static let dayParser: DateFormatter = {
         let f = DateFormatter()
@@ -718,17 +740,24 @@ struct StressModel {
     /// Build from oldest→newest daily metrics plus any stored "stress" series.
     /// Returns nil only when there is no usable signal at all.
     init?(days: [DailyMetric], stored: [(day: String, value: Double)]) {
-        guard let today = days.last else { return nil }
-
         // Stored values keyed by day, clamped to 0–3.
         let storedByDay: [String: Double] = Dictionary(
             stored.map { ($0.day, min(max($0.value, 0), 3)) },
             uniquingKeysWith: { _, b in b }
         )
 
+        // "Today" is the newest day that carries a signal. The newest ROW is often a still-forming day
+        // with no resting HR or HRV yet, and treating it as today hid all the history behind an empty
+        // "import your WHOOP export" state. (2026-10-21)
+        guard let todayIdx = days.lastIndex(where: {
+            $0.restingHr != nil || $0.avgHrv != nil || storedByDay[$0.day] != nil
+        }) else { return nil }
+        let today = days[todayIdx]
+        self.asOfDay = today.day
+
         // Baseline window: up to 30 days ending the day BEFORE today, so "today"
         // is measured against its own recent past rather than itself.
-        let history = Array(days.dropLast())
+        let history = Array(days[..<todayIdx])
         let baseline = Array(history.suffix(30))
 
         let rhrBase = baseline.compactMap { $0.restingHr }.map(Double.init)

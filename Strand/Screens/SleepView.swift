@@ -395,8 +395,8 @@ struct SleepView: View {
             }
             .padding(NoopMetrics.cardInnerPadding + NoopMetrics.space1)
             .frame(maxWidth: .infinity)
-            .timeOfDayBackground(.night)
-            .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+            // Flat tile (minimal redesign): the animated night-sky backdrop is gone.
+            .frostedCardSurface(cornerRadius: NoopMetrics.cardRadius)
         }
     }
 
@@ -1626,8 +1626,17 @@ struct SleepView: View {
     /// hierarchy so the hero reads like every other section. (#160)
     @ViewBuilder
     private func nightNavHeader(trailing: String) -> some View {
-        let lastIndex = max(navDays.count - 1, 0)
-        let title: LocalizedStringKey = nightOffset == 0 ? "Last night"
+        let days = navDays
+        let lastIndex = max(days.count - 1, 0)
+        // "Last night" only when the newest recorded night really ended today or yesterday; a newest
+        // night from weeks ago reads "Latest night" (its date sits in the trailing slot). (2026-10-21)
+        let newestIsRecent: Bool = {
+            guard let end = days.first?.map(\.endTs).max() else { return false }
+            let ended = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(end)))
+            let today = Calendar.current.startOfDay(for: Date())
+            return (Calendar.current.dateComponents([.day], from: ended, to: today).day ?? 99) <= 1
+        }()
+        let title: LocalizedStringKey = nightOffset == 0 ? (newestIsRecent ? "Last night" : "Latest night")
             : (nightOffset == 1 ? "1 night ago" : "\(nightOffset) nights ago")
         VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
             HStack(spacing: NoopMetrics.cardInnerSpacing) {
