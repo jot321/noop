@@ -97,8 +97,15 @@ backup() {
   local dest="$BACKUPS/$(date +%Y-%m-%d-%H%M%S)"
   mkdir -p "$dest"
   log "Backing up $BUNDLE_ID Library to $dest"
-  pmd3 apps pull --udid "$DEVICE_UDID" "$BUNDLE_ID" /Library "$dest/" >/dev/null 2>&1 ||
-    die "could not copy the app's Library off the phone"
+  # Copy only the data that matters. Caches, snapshots and saved state can carry complete file
+  # protection, which makes AFC refuse the whole Library while the phone is locked (status 10).
+  mkdir -p "$dest/Library/Application Support" "$dest/Library/Preferences"
+  pmd3 apps pull --udid "$DEVICE_UDID" "$BUNDLE_ID" "/Library/Application Support/OpenWhoop" \
+    "$dest/Library/Application Support/" >/dev/null 2>&1 || die "could not copy the database off the phone"
+  pmd3 apps pull --udid "$DEVICE_UDID" "$BUNDLE_ID" "/Library/Preferences" "$dest/Library/" >/dev/null 2>&1 ||
+    log "Preferences not copied (phone locked?); the database backup is complete"
+  pmd3 apps pull --udid "$DEVICE_UDID" "$BUNDLE_ID" "/Library/Application Support/com.noopapp.noop" \
+    "$dest/Library/Application Support/" >/dev/null 2>&1 || true   # rejected-frame archive, optional
   local db="$dest/Library/Application Support/OpenWhoop/whoop.sqlite"
   [ -f "$db" ] || die "backup has no whoop.sqlite at $db"
   local check; check=$(sqlite3 -readonly "$db" 'PRAGMA quick_check;' 2>&1 | head -1)
