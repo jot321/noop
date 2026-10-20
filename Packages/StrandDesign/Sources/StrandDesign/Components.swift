@@ -173,9 +173,9 @@ public struct StatTile<Accessory: View>: View {
     }
 
     public var body: some View {
-        // The tile borrows its accent as a faint card wash, so each metric tile reads as
-        // part of its colour world while staying legible on the deep blue-black.
-        NoopCard(padding: 14, tint: accent) {
+        // Minimal (2026-10-21): a flat tile, white value, one accent line; the delta sits on its own
+        // line under the value so it never truncates beside a wide number.
+        NoopCard(padding: 14) {
             VStack(alignment: .leading, spacing: 0) {
                 // Header row: the metric label, and (right-aligned) the optional accessory laid out in
                 // flow so it reserves its own space rather than floating over the value below (#495).
@@ -185,17 +185,17 @@ public struct StatTile<Accessory: View>: View {
                     accessory()
                 }
                 Spacer(minLength: 4)
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(value).font(StrandFont.number(26)).foregroundStyle(accent).lineLimit(1).minimumScaleFactor(0.6)
-                    Spacer(minLength: 0)
-                    // Trend chip — the delta as a tinted pill with a direction arrow.
-                    if let delta { TrendChip(text: delta, color: deltaColor) }
-                }
+                Text(value).font(StrandFont.number(26)).foregroundStyle(StrandPalette.textPrimary)
+                    .lineLimit(1).minimumScaleFactor(0.6)
+                if let delta { TrendChip(text: delta).padding(.top, 2) }
                 // Sparkline isn't available on watchOS (it relies on chart-hover helpers); the watch
                 // doesn't use StatTile, but guard the reference so the file still compiles there.
                 #if !os(watchOS)
                 if let sparkline, sparkline.count > 1 {
-                    Sparkline(values: sparkline, gradient: Gradient(colors: [sparkColor.opacity(0.5), sparkColor]))
+                    let lo = sparkline.min() ?? 0, hi = sparkline.max() ?? 0
+                    let mean = sparkline.reduce(0, +) / Double(sparkline.count)
+                    MinimalLine(values: sparkline, tint: sparkColor, lineWidth: 1.5,
+                                minSpan: max(abs(mean) * 0.05, (hi - lo) * 0.5, 1e-6))
                         .frame(height: 22).padding(.top, 4)
                         .accessibilityHidden(true)
                 }
@@ -258,9 +258,9 @@ public struct TrendChip: View {
             // the pill never grows a tile past its floor. Matches Android's unconditional ellipsize (#934).
             Text(text).font(StrandFont.captionNumber).lineLimit(1)
         }
-        .foregroundStyle(color)
-        .padding(.horizontal, 6).padding(.vertical, 2)
-        .background(color.opacity(0.14), in: Capsule(style: .continuous))
+        // Minimal (2026-10-21): plain secondary text with its arrow, no tinted pill. `color` is kept for
+        // source compatibility; good/bad is carried by the arrow and the words, not by hue.
+        .foregroundStyle(StrandPalette.textSecondary)
         .accessibilityHidden(true)
     }
 }

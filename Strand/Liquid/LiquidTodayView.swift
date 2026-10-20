@@ -1008,6 +1008,10 @@ struct LiquidTodayView: View {
     }
 
     private var synthLine: String {
+        // No score of today's own: a readiness sentence from older days would read as today's verdict.
+        if displayDay?.recovery == nil, displayDay?.strain == nil, restScore == nil {
+            return String(localized: "No scores for today yet. They fill in after a night's sleep.")
+        }
         switch readiness.level {
         case .primed: return "You're primed. A hard session should land well today."
         case .balanced: return "You're in a good spot for training."
