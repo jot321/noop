@@ -365,11 +365,26 @@ public enum SleepStagerV2 {
 
     /// Soft sleep-cycle prior added to the log-emission: deep concentrated early (decays, never hard-wiped);
     /// REM suppressed in the first ~12 % (REM latency) then rising toward morning.
+    ///
+    /// Each prior is capped BELOW that stage's log-prior gap to light (REM 0.82, deep 1.02) by a margin.
+    /// Uncapped, the prior alone flipped late epochs to REM and early ones to deep on a night with no
+    /// evidence, inventing about a fifth of the night; capped, it only tilts close calls. (Audit A3.)
+    static let maxCyclePrior: [String: Double] = ["deep": 0.7, "rem": 0.5]
+
     static func cyclePrior(_ c: Double) -> [String: Double] {
-        ["deep": 1.2 * max(0.0, 1.0 - c / 0.55),
-         "rem": 1.0 * c - (c < 0.12 ? 3.0 : 0.0),
+        ["deep": min(maxCyclePrior["deep"]!, 1.2 * max(0.0, 1.0 - c / 0.55)),
+         "rem": min(maxCyclePrior["rem"]!, 1.0 * c) - (c < 0.12 ? 3.0 : 0.0),
          "light": 0.0, "awake": 0.0]
     }
+
+    /// Absolute floor on each channel's within-night spread, in its own units (bpm, bpm, fraction,
+    /// peakedness). A pure per-night z-score stretched a channel that barely varied all night to ±1,
+    /// manufacturing stage contrast from noise; with the floor, a near-flat channel stays near z = 0 and
+    /// carries no stage evidence. (Audit A3, 2026-10-21.)
+    static let minSpreadHR = 2.0
+    static let minSpreadHRVar = 0.5
+    static let minSpreadMoveFrac = 0.02
+    static let minSpreadRespReg = 0.05
 
     /// Viterbi most-likely path over the per-epoch log-emissions with the sticky transition matrix and a
     /// uniform start. Ties resolve to the earlier stage in `stageNames`.
@@ -404,19 +419,20 @@ public enum SleepStagerV2 {
     static func stageEpochs(_ feats: [Epoch]) -> [String] {
         if feats.isEmpty { return [] }
 
-        // Per-night z-score over the present values (population std; 0 std → 1 so a flat channel is neutral).
-        func zfun(_ vals: [Double?]) -> (Double?) -> Double {
+        // Per-night z-score over the present values (population std, floored at the channel's absolute
+        // minimum spread so a near-flat channel stays neutral; 0 std with no floor → 1).
+        func zfun(_ vals: [Double?], minSpread: Double) -> (Double?) -> Double {
             let present = vals.compactMap { $0 }
             if present.isEmpty { return { _ in 0.0 } }
             let m = present.reduce(0, +) / Double(present.count)
             let sd0 = (present.reduce(0.0) { $0 + ($1 - m) * ($1 - m) } / Double(present.count)).squareRoot()
-            let sd = sd0 == 0 ? 1.0 : sd0
+            let sd = max(sd0, minSpread) == 0 ? 1.0 : max(sd0, minSpread)
             return { v in v == nil ? 0.0 : (v! - m) / sd }
         }
-        let zhr = zfun(feats.map { $0.hr })
-        let zhv = zfun(feats.map { $0.hrVar })
-        let zmv = zfun(feats.map { Optional($0.moveFrac) })
-        let zrg = zfun(feats.map { $0.respReg })
+        let zhr = zfun(feats.map { $0.hr }, minSpread: minSpreadHR)
+        let zhv = zfun(feats.map { $0.hrVar }, minSpread: minSpreadHRVar)
+        let zmv = zfun(feats.map { Optional($0.moveFrac) }, minSpread: minSpreadMoveFrac)
+        let zrg = zfun(feats.map { $0.respReg }, minSpread: minSpreadRespReg)
 
         // HR-flatness percentile rank within the night (bisect_right / n), neutral 0.5 when missing.
         let fsorted = feats.compactMap { $0.hrFlat11 }.sorted()

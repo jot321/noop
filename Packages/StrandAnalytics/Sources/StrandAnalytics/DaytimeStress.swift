@@ -174,10 +174,12 @@ public enum DaytimeStress {
             hrByBucket[bucket, default: []].append(Double(s.bpm))
         }
         var rrByBucket: [Int: [Double]] = [:]
+        var rrTsByBucket: [Int: [Int]] = [:]
         for s in rr {
             let local = s.ts + tzOffsetSeconds
             let bucket = floorDiv(local, bucketSeconds) * bucketSeconds
             rrByBucket[bucket, default: []].append(Double(s.rrMs))
+            rrTsByBucket[bucket, default: []].append(s.ts)
         }
 
         // 2) Per-hour mean HR + RMSSD (RMSSD via the shared HRV cleaner, so ectopic
@@ -190,7 +192,9 @@ public enum DaytimeStress {
         for b in orderedBuckets {
             let hrs = hrByBucket[b] ?? []
             let mHR = hrs.count >= minHourHRSamples ? mean(hrs) : nil
-            let rrRes = HRVAnalyzer.analyze(rawRR: rrByBucket[b] ?? [])
+            // Timestamps let rMSSD skip time gaps: daytime R-R is sparse, and differencing beats
+            // minutes apart produced impossible hourly values (audit A6).
+            let rrRes = HRVAnalyzer.analyze(rawRR: rrByBucket[b] ?? [], ts: rrTsByBucket[b] ?? [])
             aggs.append(HourAgg(bucket: b, meanHR: mHR, rmssd: rrRes.rmssd, nHR: hrs.count))
         }
 

@@ -147,8 +147,24 @@ final class DaytimeStressTests: XCTestCase {
     }
 
     /// R-R for one hour with a controllable beat-to-beat jitter (drives RMSSD).
+    /// The beats are CONTIGUOUS (each timestamp advances by its own interval), as a real stream is: rMSSD
+    /// only differences adjacent beats, so beats spaced minutes apart yield no rMSSD (audit A6).
     private func hourRRVariable(_ hour: Int, rrMs: Int, jitter: Int, n: Int = 60) -> [RRInterval] {
         let base = hour * 3_600
-        return (0..<n).map { RRInterval(ts: base + $0 * 50, rrMs: rrMs + ($0 % 2 == 0 ? jitter : -jitter)) }
+        var elapsedMs = 0
+        return (0..<n).map { i in
+            let rr = rrMs + (i % 2 == 0 ? jitter : -jitter)
+            elapsedMs += rr
+            return RRInterval(ts: base + elapsedMs / 1_000, rrMs: rr)
+        }
+    }
+
+    func testSparseBeatsMinutesApartGiveNoHourlyRMSSD() {
+        // Audit A6: beats 50 s apart are not successive beats, so differencing them invented HRV.
+        var hr: [HRSample] = []
+        for h in [8, 9] { hr += hourHR(h, bpm: 65) }
+        let sparse = (0..<60).map { RRInterval(ts: 8 * 3_600 + $0 * 50, rrMs: 900 + ($0 % 2 == 0 ? 40 : -40)) }
+        let r = DaytimeStress.analyze(hr: hr, rr: sparse)
+        XCTAssertNil(r.hours.first { $0.hour == 8 }?.rmssd ?? nil)
     }
 }

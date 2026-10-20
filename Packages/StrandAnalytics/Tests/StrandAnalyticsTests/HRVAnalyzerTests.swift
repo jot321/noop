@@ -186,4 +186,37 @@ final class HRVAnalyzerTests: XCTestCase {
         XCTAssertEqual(result.nClean, 31)
         XCTAssertEqual(result.rmssd!, 0.0, accuracy: 1e-9)  // all 800 → no successive diffs
     }
+
+    // MARK: - Adjacent successive differences (audit A6, 2026-10-21)
+
+    func testRMSSDDoesNotDifferenceAcrossARejectedBeat() {
+        // 800 800 800 1600(ectopic) 1000 1000 1000: compacting the clean series used to difference
+        // 800 -> 1000 across the dropped beat (a fake 200 ms step). Adjacent-only gives 0 ms.
+        let rr: [Double] = [800, 800, 800, 800, 1_600, 1_000, 1_000, 1_000, 1_000]
+        XCTAssertFalse(HRVAnalyzer.cleanMask(rr)[4], "the 1600 ms beat is ectopic")
+        XCTAssertEqual(HRVAnalyzer.adjacentDiffs(rr), [0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(HRVAnalyzer.rmssd(diffs: HRVAnalyzer.adjacentDiffs(rr)), 0)
+    }
+
+    func testRMSSDSkipsTimeGaps() {
+        // Two contiguous runs a minute apart: the pair spanning the gap is not differenced.
+        let rr: [Double] = [900, 950, 900, 1_000, 950, 1_000]
+        let ts = [0, 1, 2, 62, 63, 64]
+        let diffs = HRVAnalyzer.adjacentDiffs(rr, ts: ts)
+        XCTAssertEqual(diffs, [50, -50, -50, 50])
+    }
+
+    func testCleanMaskMatchesCleanRR() {
+        let rr: [Double] = [800, 810, 2_400, 790, 805, 200, 815, 1_500, 800, 820]
+        let mask = HRVAnalyzer.cleanMask(rr)
+        XCTAssertEqual(zip(rr, mask).filter { $0.1 }.map { $0.0 }, HRVAnalyzer.cleanRR(rr))
+    }
+
+    func testAnalyzeWithTimestampsIgnoresSparseBeats() {
+        // Beats 50 s apart are not successive beats: no rMSSD, though SDNN still describes the spread.
+        let rr = (0..<40).map { RRInterval(ts: $0 * 50, rrMs: 900 + ($0 % 2 == 0 ? 40 : -40)) }
+        let r = HRVAnalyzer.analyze(rr)
+        XCTAssertNil(r.rmssd)
+        XCTAssertNotNil(r.sdnn)
+    }
 }

@@ -208,7 +208,7 @@ extension WhoopStore {
             }
             // rr: stream=rr → rr_ms (col 4).
             for r in try Row.fetchAll(db, sql:
-                "SELECT ts, rrMs FROM rrInterval WHERE deviceId = ? AND ts >= ? ORDER BY ts",
+                "SELECT ts, rrMs FROM rrInterval WHERE deviceId = ? AND ts >= ? ORDER BY ts, rowid",
                 arguments: [deviceId, floor]) {
                 var row = RawCSVRow(ts: r["ts"]); row.cols[0] = "rr"
                 row.cols[2] = WhoopStore.intStr(r["rrMs"])

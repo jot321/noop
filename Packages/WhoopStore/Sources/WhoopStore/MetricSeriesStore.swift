@@ -45,6 +45,26 @@ extension WhoopStore {
         }
     }
 
+    /// Delete the points for `keys` on days in [from, to] whose day is NOT in `keepingDays`, so a pass
+    /// that recomputes a series over a window can drop points it no longer produces (upsert alone never
+    /// removes a stale row). Returns rows deleted. (Audit A13, 2026-10-21.)
+    @discardableResult
+    public func deleteMetricSeries(deviceId: String, keys: [String], from: String, to: String,
+                                   keepingDays: Set<String>) async throws -> Int {
+        guard !keys.isEmpty else { return 0 }
+        return try syncWrite { db in
+            let keyMarks = Array(repeating: "?", count: keys.count).joined(separator: ", ")
+            var sql = "DELETE FROM metricSeries WHERE deviceId = ? AND key IN (\(keyMarks)) AND day >= ? AND day <= ?"
+            var args: [DatabaseValueConvertible] = [deviceId] + keys + [from, to]
+            if !keepingDays.isEmpty {
+                sql += " AND day NOT IN (\(Array(repeating: "?", count: keepingDays.count).joined(separator: ", ")))"
+                args += keepingDays.sorted()
+            }
+            try db.execute(sql: sql, arguments: StatementArguments(args))
+            return db.changesCount
+        }
+    }
+
     // MARK: - Reads
 
     /// Points for a single `key` on days in [from, to] (lexicographic YYYY-MM-DD compare),

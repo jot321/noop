@@ -268,6 +268,51 @@ final class IntelligenceEngine: ObservableObject {
         if !computing { UserDefaults.standard.set(true, forKey: Self.effortRescoreFlagKey) }
     }
 
+    /// UserDefaults flag guarding the one-shot rescore after the October 2026 calculation fixes (below).
+    static let auditRescoreFlagKey = "intelligence.auditRescore.v20261021.done"
+
+    /// One-shot full-history rescore after the October 2026 calculation fixes: recovery against prior
+    /// nights only (A1), naps on their own day (A2), adjacent-beat rMSSD (A6), capped steps (A12) and
+    /// own-data day gating (A13). Without it, every day older than the 21-day window would keep the old
+    /// numbers, and backfilled days outside it would stay unscored. Same pattern as the Effort rescore.
+    func runAuditRescoreIfNeeded(historyDays: Int = 4000) async {
+        guard !UserDefaults.standard.bool(forKey: Self.auditRescoreFlagKey) else { return }
+        await analyzeRecent(maxDays: historyDays)
+        if !computing { UserDefaults.standard.set(true, forKey: Self.auditRescoreFlagKey) }
+    }
+
+    /// Days a post-sync rescore must cover so that backfilled days older than the usual window get
+    /// scored: after a long gap the strap hands over weeks-old history, and the 21-day pass never
+    /// reached it, so those days stayed unscored. Returns `defaultDays` when nothing older is pending.
+    /// (Audit A15, 2026-10-21.)
+    func rescoreDaysAfterBackfill(defaultDays: Int = 21, historyDays: Int = 4000) async -> Int {
+        guard let store = await repo.storeHandle() else { return defaultDays }
+        let tz = TimeZone.current.secondsFromGMT()
+        let now = Int(Date().timeIntervalSince1970)
+        let todayIdx = (now + tz) / 86_400
+        let windowOldestIdx = todayIdx - (defaultDays - 1)
+        guard let counts = try? await store.hrDayCounts(deviceId: deviceId, from: now - historyDays * 86_400,
+                                                        to: windowOldestIdx * 86_400 - tz, offsetSec: tz)
+        else { return defaultDays }
+        let scored = Set(((try? await store.dailyMetrics(deviceId: deviceId + "-noop", from: "0000-01-01",
+                                                         to: "9999-12-31")) ?? []).map(\.day))
+        return Self.rescoreDays(hrDayCounts: counts, scoredDays: scored, todayIdx: todayIdx,
+                                tzOffset: tz, defaultDays: defaultDays, historyDays: historyDays)
+    }
+
+    /// Pure core of `rescoreDaysAfterBackfill`: the oldest day index older than the default window with
+    /// enough HR (the same 200-sample bar the pass uses) and no computed row decides the width.
+    nonisolated static func rescoreDays(hrDayCounts: [Int: Int], scoredDays: Set<String>, todayIdx: Int,
+                                        tzOffset: Int, defaultDays: Int, historyDays: Int) -> Int {
+        let windowOldestIdx = todayIdx - (defaultDays - 1)
+        let unscored = hrDayCounts
+            .filter { $0.key < windowOldestIdx && $0.value >= 200 }
+            .map(\.key)
+            .filter { !scoredDays.contains(AnalyticsEngine.dayString($0 * 86_400 - tzOffset, offsetSec: tzOffset)) }
+        guard let oldest = unscored.min() else { return defaultDays }
+        return min(historyDays, todayIdx - oldest + 1)
+    }
+
     /// UserDefaults flag guarding the one-shot #547 implausible-timestamp DB heal (below). Set once the
     /// heal completes so it never re-runs.
     static let timestampHealFlagKey = "intelligence.timestampHeal.v547.done"
@@ -503,6 +548,10 @@ final class IntelligenceEngine: ObservableObject {
 
                 let hr = (try? await store.hrSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
                 guard hr.count >= 200 else { continue }   // need real raw data, not a stray sample
+                // The 54 h read window reaches into the previous day, so it can hold 200 samples while
+                // the day itself has none; such a day was scored with sleep and steps it never had.
+                // Require the day's OWN data. (Audit A13, 2026-10-21.)
+                guard Self.hasOwnData(hr, dayStart: dayStart, dayEnd: nextMidnight) else { continue }
                 let rr = (try? await store.rrIntervals(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
                 let resp = (try? await store.respSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
                 let grav = (try? await store.gravitySamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
@@ -700,6 +749,20 @@ final class IntelligenceEngine: ObservableObject {
         for (day, v) in nightlyHrvByDay where histHrvByDay[day] == nil { histHrvByDay[day] = v }
         for (day, v) in nightlyRhrByDay where histRhrByDay[day] == nil { histRhrByDay[day] = v }
         for (day, v) in nightlyRespByDay where histRespByDay[day] == nil { histRespByDay[day] = v }
+        // On-device nights persisted by earlier passes, from before this pass's window, seed the
+        // baseline too: without them it never saw more than `maxDays` nights, so the 14-night trusted
+        // state and the 14/21-night half-lives were cut short. Imports and this pass still win per day.
+        // (Audit A1, 2026-10-21.)
+        if let passOldest = scoredNights.map({ $0.daily.day }).min() {
+            let priorComputed = ((try? await store.dailyMetrics(deviceId: computedId, from: "0000-01-01",
+                                                                to: passOldest)) ?? [])
+                .filter { $0.day < passOldest }
+            for d in priorComputed {
+                if histHrvByDay[d.day] == nil { histHrvByDay[d.day] = d.avgHrv }
+                if histRhrByDay[d.day] == nil { histRhrByDay[d.day] = d.restingHr.map(Double.init) }
+                if histRespByDay[d.day] == nil { histRespByDay[d.day] = d.respRateBpm }
+            }
+        }
         // rhr/resp/skin honour the Charge-wide recalibration epoch (noop.recoveryBaselineEpoch); 0 = no-op,
         // so this is byte-identical to the plain fold until the user taps Recalibrate, at which point the
         // whole Charge build-up (HRV + resting HR + resp + skin) re-anchors together.
@@ -717,18 +780,27 @@ final class IntelligenceEngine: ObservableObject {
         // Resp baseline gated on `usable`: RecoveryScorer includes the resp term whenever a
         // baseline object is present , a CALIBRATING (<4-night) baseline would let one noisy
         // RSA night move recovery (mirrors the skin-temp use-site gate; honest cold-start).
-        let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, cfg: respCfg, baselineEpoch: recoveryEpoch)
-        // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
-        // (AnalyticsEngine's skinTempDevC guard) so this is belt-and-suspenders, but it stops a
-        // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
-        let skinFold = Baselines.foldHistory(skinSeq, dayKeys: skinDayKeys, cfg: skinCfg, baselineEpoch: recoveryEpoch)
-        let baselines2 = AnalyticsEngine.ProfileBaselines(
-            // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via their
-            // parallel day keys, so the manual Recalibrate restarts the whole Charge build-up together.
-            hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, cfg: hrvCfg),
-            restingHR: Baselines.foldHistory(rhrSeq, dayKeys: rhrDayKeys, cfg: rhrCfg, baselineEpoch: recoveryEpoch),
-            resp: respFold.usable ? respFold : nil,
-            skinTemp: skinFold.usable ? skinFold : nil)
+        // Each night is scored against a baseline folded ONLY over the nights before it (audit A1,
+        // 2026-10-21). One fold over the whole window let a night's own value and every later night
+        // move its Charge, gave the first nights scores before any baseline existed, and shifted past
+        // scores as new nights arrived.
+        func baselinesBefore(_ day: String) -> AnalyticsEngine.ProfileBaselines {
+            let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, before: day, cfg: respCfg,
+                                                 baselineEpoch: recoveryEpoch)
+            // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
+            // (AnalyticsEngine's skinTempDevC guard) so this is belt-and-suspenders, but it stops a
+            // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
+            let skinFold = Baselines.foldHistory(skinSeq, dayKeys: skinDayKeys, before: day, cfg: skinCfg,
+                                                 baselineEpoch: recoveryEpoch)
+            return AnalyticsEngine.ProfileBaselines(
+                // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via
+                // their parallel day keys, so the manual Recalibrate restarts the whole Charge build-up.
+                hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, before: day, cfg: hrvCfg),
+                restingHR: Baselines.foldHistory(rhrSeq, dayKeys: rhrDayKeys, before: day, cfg: rhrCfg,
+                                                 baselineEpoch: recoveryEpoch),
+                resp: respFold.usable ? respFold : nil,
+                skinTemp: skinFold.usable ? skinFold : nil)
+        }
 
         // Real (non-detected) workouts in the scored window, used to de-duplicate detected bouts so a
         // user who BOTH has real sessions AND wears the strap doesn't see the same session twice (the
@@ -801,6 +873,7 @@ final class IntelligenceEngine: ObservableObject {
         for night in scoredNights {
             let daily = sleepEditedDaily(night.daily, detected: night.cachedSleep, editsByStart: editsByStart,
                                          habitualMidsleepSec: habitualMidsleepSec)
+            let baselines2 = baselinesBefore(daily.day)
             let recovery = recomputeRecovery(daily, baselines2)
             // Charge term-breakdown trace (Group G): only when the Recovery test mode is on. Emits which
             // term moved Charge and which was nil and forced the renorm, tagged `.recovery`. The trace's
@@ -1183,6 +1256,13 @@ final class IntelligenceEngine: ObservableObject {
                                                              chronoAge: Double(profile.age))
         }
         if !vitalityPts.isEmpty { _ = try? await store.upsertMetricSeries(vitalityPts, deviceId: computedId) }
+        // Upsert never removes a point, so a week whose data has gone kept its old Vitality/Body Age.
+        // Drop weekly points this pass no longer produces, for weeks wholly inside its window. (Audit A13.)
+        if let firstFullWeekSat = IntelligenceEngine.dayString(offsetDays: 6, from: oldestDay) {
+            _ = try? await store.deleteMetricSeries(deviceId: computedId, keys: ["vitality", "body_age"],
+                                                    from: firstFullWeekSat, to: newestDay,
+                                                    keepingDays: Set(vitalityPts.map(\.day)))
+        }
 
         // ── Acute:Chronic Workload Ratio (ACWR) on Effort (WS-4c) ───────────────────────────────────
         // 7-day acute ÷ 28-day chronic mean daily Effort, computed per day, so Effort HISTORY reads as
@@ -1664,10 +1744,13 @@ final class IntelligenceEngine: ObservableObject {
         // A hand-logged nap is a userEdited row with NO detected twin , it would never be
         // visited by the substitution pass, so its minutes were dropped from the day's Rest
         // total. Pass those twinless rows through the union channel so they fold in. (#518/#508)
+        // `editsByStart` spans the whole pass window, so keep only twinless blocks that END on this
+        // day: unfiltered, one logged nap was added to every night without a detected sleep. (Audit A2)
         let detectedStarts = Set(detected.map { $0.startTs })
-        let manualTuples = editsByStart
-            .filter { !detectedStarts.contains($0.key) }
-            .map { (startTs: $0.key, stagesJSON: $0.value.stagesJSON) }
+        let offsetSec = TimeZone.current.secondsFromGMT()
+        let manualEdits = Self.twinlessEdits(endingOn: daily.day, editsByStart: editsByStart,
+                                             detectedStarts: detectedStarts, offsetSec: offsetSec)
+        let manualTuples = manualEdits.map { (startTs: $0.startTs, stagesJSON: $0.stagesJSON) }
         // #525/#547: supply each block's EFFECTIVE onset (audit finding C / #8) keyed by its stable
         // detected startTs, plus the device tz offset + learned habitual midsleep, so the edited recompute
         // picks the SAME MAIN NIGHT the Sleep tab shows. The onset must be the user-CORRECTED bedtime
@@ -1681,19 +1764,41 @@ final class IntelligenceEngine: ObservableObject {
         for d in detected {
             onsetByStart[d.startTs] = editsByStart[d.startTs]?.effectiveStartTs ?? d.effectiveStartTs
         }
-        for (start, edit) in editsByStart where !detectedStarts.contains(start) {
-            onsetByStart[start] = edit.effectiveStartTs
+        for edit in manualEdits {
+            onsetByStart[edit.startTs] = edit.effectiveStartTs
         }
         guard let r = SleepStageTotals.dailyAggregateHonoringEdits(detected: detectedTuples,
                                                                    edited: editedStages,
                                                                    manual: manualTuples,
                                                                    onsetByStart: onsetByStart,
-                                                                   offsetSec: TimeZone.current.secondsFromGMT(),
+                                                                   offsetSec: offsetSec,
                                                                    habitualMidsleepSec: habitualMidsleepSec),
               r.editApplied else { return daily }
         let agg = r.sleep
         return daily.with(totalSleepMin: agg.totalSleepMin, efficiency: agg.efficiency,
                           deepMin: agg.deepMin, remMin: agg.remMin, lightMin: agg.lightMin)
+    }
+
+    /// True when at least `minSamples` HR samples fall inside the local day [dayStart, dayEnd) itself,
+    /// not merely inside the wider read window around it. (Audit A13.)
+    nonisolated static func hasOwnData(_ hr: [HRSample], dayStart: Int, dayEnd: Int, minSamples: Int = 200) -> Bool {
+        var n = 0
+        for s in hr where s.ts >= dayStart && s.ts < dayEnd {
+            n += 1
+            if n >= minSamples { return true }
+        }
+        return false
+    }
+
+    /// The user-edited blocks with no detected twin on `day` whose (edited) end falls on `day` in local
+    /// time , the same end-day rule sessions are attributed by everywhere else. Sorted by start.
+    nonisolated static func twinlessEdits(endingOn day: String, editsByStart: [Int: CachedSleepSession],
+                                          detectedStarts: Set<Int>, offsetSec: Int) -> [CachedSleepSession] {
+        editsByStart
+            .filter { !detectedStarts.contains($0.key)
+                && AnalyticsEngine.dayString($0.value.endTs, offsetSec: offsetSec) == day }
+            .map { $0.value }
+            .sorted { $0.startTs < $1.startTs }
     }
 
     /// Re-derive the skin-temperature deviation (°C) for a night against the freshly-seeded personal

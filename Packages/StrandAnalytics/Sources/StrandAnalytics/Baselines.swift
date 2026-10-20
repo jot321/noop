@@ -337,6 +337,21 @@ public enum Baselines {
                              nightsSinceUpdate: 0, status: .calibrating)
     }
 
+    /// `foldHistory(_:dayKeys:cfg:baselineEpoch:)` over only the nights strictly BEFORE `day`
+    /// ("yyyy-MM-dd"; `dayKeys` chronological). A night is scored against what was known going into
+    /// it, never against its own value or later nights, so a past score doesn't shift as new nights
+    /// arrive and the first nights stay calibrating. (Audit A1, 2026-10-21.)
+    public static func foldHistory(_ values: [Double?], dayKeys: [String], before day: String,
+                                   cfg: MetricCfg, baselineEpoch: Double? = nil) -> BaselineState {
+        var lo = 0, hi = min(values.count, dayKeys.count)
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if dayKeys[mid] < day { lo = mid + 1 } else { hi = mid }
+        }
+        return foldHistory(Array(values[..<lo]), dayKeys: Array(dayKeys[..<lo]), cfg: cfg,
+                           baselineEpoch: baselineEpoch)
+    }
+
     // MARK: - Deviation
 
     /// Compute z / delta / ratio / in-normal-range for a value vs a baseline.

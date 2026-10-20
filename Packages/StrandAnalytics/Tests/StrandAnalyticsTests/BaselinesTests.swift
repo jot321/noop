@@ -277,4 +277,26 @@ final class BaselinesTests: XCTestCase {
         XCTAssertEqual(after.nValid, 0)
         XCTAssertEqual(after.status, .calibrating)
     }
+
+    // MARK: - Prior-only fold (audit A1, 2026-10-21)
+
+    func testFoldBeforeDayIgnoresThatNightAndLaterOnes() {
+        let keys = ["2026-07-10", "2026-07-11", "2026-07-12", "2026-07-13"]
+        let vals: [Double?] = [50, 52, 90, 40]
+        let before12 = Baselines.foldHistory(vals, dayKeys: keys, before: "2026-07-12",
+                                             cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        let expected = Baselines.foldHistory([50, 52], dayKeys: ["2026-07-10", "2026-07-11"],
+                                             cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        XCTAssertEqual(before12.baseline, expected.baseline, accuracy: 1e-9)
+        XCTAssertEqual(before12.nValid, 2, "the night itself (90) and later nights must not count")
+    }
+
+    func testFirstNightHasNoPriorBaseline() {
+        let keys = ["2026-07-10", "2026-07-11"]
+        let first = Baselines.foldHistory([50, 52], dayKeys: keys, before: "2026-07-10",
+                                          cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        XCTAssertEqual(first.nValid, 0)
+        XCTAssertEqual(first.status, .calibrating)
+        XCTAssertFalse(first.usable)
+    }
 }

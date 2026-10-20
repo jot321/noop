@@ -150,14 +150,68 @@ final class SleepStagerV2Tests: XCTestCase {
         // Same accepted window (detection is identical — only staging differs).
         XCTAssertEqual(v2.start, v1.start)
         XCTAssertEqual(v2.end, v1.end)
-        // The hypnogram is V2's: it matches a direct V2 stageSession over the accepted span, and (proof
-        // the flag actually flipped the engine) it expresses both deep and REM.
+        // The hypnogram is V2's: it matches a direct V2 stageSession over the accepted span.
         let v2Direct = SleepStagerV2.stageSession(start: v2.start, end: v2.end,
                                                   grav: grav, hr: hr, rr: rr, resp: [])
         XCTAssertEqual(v2.stages.map { $0.stage }, v2Direct.map { $0.stage },
                        "flag ON must produce the V2 hypnogram")
+        // This fixture has no sleep-cycle signal (a 52-54 bpm sawtooth, still wrist, regular R-R), so V2
+        // must not invent deep or REM from its clock prior. It used to "express" both here, which was the
+        // audit A3 bug. `testRealContrastStillStagesDeepAndREM` covers a night that does carry evidence.
         let v2Stages = Set(v2.stages.map { $0.stage })
-        XCTAssertTrue(v2Stages.contains("deep"), "V2 night should express deep")
-        XCTAssertTrue(v2Stages.contains("rem"), "V2 night should express REM")
+        XCTAssertFalse(v2Stages.contains("rem"), "no REM from the prior alone")
+        XCTAssertFalse(v2Stages.contains("deep"), "no deep from the prior alone")
+    }
+
+    // MARK: - No stages without evidence (audit A3, 2026-10-21)
+
+    private func flatNight(epochs n: Int = 840, hrVar: (Int) -> Double = { _ in 1.0 }) -> [SleepStagerV2.Epoch] {
+        (0..<n).map { i in
+            SleepStagerV2.Epoch(start: i * 30, hr: 60, hrVar: hrVar(i), hrFlat11: 1.0, moveFrac: 0,
+                                jerkMax: 0, respReg: nil, clock: Double(i) / Double(n), jerkScale: 1)
+        }
+    }
+
+    func testFeaturelessNightIsAllLight() {
+        // Uncapped, the clock prior alone turned the last ~fifth of a flat 7 h night into REM.
+        let stages = SleepStagerV2.stageEpochs(flatNight())
+        XCTAssertFalse(stages.contains("rem"), "no REM without evidence")
+        XCTAssertFalse(stages.contains("deep"), "no deep without evidence")
+    }
+
+    func testNearFlatChannelCarriesNoStageEvidence() {
+        // A 0.1 bpm wiggle in HR variability is noise; a pure z-score stretched it to ±1.
+        let stages = SleepStagerV2.stageEpochs(flatNight(hrVar: { i in 1.0 + (i % 40 < 20 ? 0.1 : -0.1) }))
+        XCTAssertFalse(stages.contains("rem"))
+        XCTAssertFalse(stages.contains("deep"))
+    }
+
+    func testCyclePriorStaysBelowTheLightGap() {
+        let gapRem = SleepStagerV2.baseLogPrior["light"]! - SleepStagerV2.baseLogPrior["rem"]!
+        let gapDeep = SleepStagerV2.baseLogPrior["light"]! - SleepStagerV2.baseLogPrior["deep"]!
+        for c in stride(from: 0.0, through: 1.0, by: 0.05) {
+            let p = SleepStagerV2.cyclePrior(c)
+            XCTAssertLessThan(p["rem"]!, gapRem)
+            XCTAssertLessThan(p["deep"]!, gapDeep)
+        }
+    }
+
+    func testRealContrastStillStagesDeepAndREM() {
+        // Early quiet, flat-HR blocks (deep-like) and late high-variability, higher-HR blocks (REM-like)
+        // around a light baseline: with real contrast V2 must still find both stages.
+        let n = 840
+        let feats: [SleepStagerV2.Epoch] = (0..<n).map { i in
+            let c = Double(i) / Double(n)
+            let deepLike = c < 0.35 && (i / 20) % 3 == 0       // ~12% of epochs
+            let remLike = c > 0.6 && (i / 20) % 3 == 0          // ~13% of epochs
+            return SleepStagerV2.Epoch(start: i * 30,
+                                       hr: remLike ? 58 : (deepLike ? 50 : 53),
+                                       hrVar: remLike ? 3.0 : (deepLike ? 0.5 : 1.5),
+                                       hrFlat11: remLike ? 3.0 : (deepLike ? 0.3 : 1.5),
+                                       moveFrac: 0, jerkMax: 0, respReg: nil, clock: c, jerkScale: 1)
+        }
+        let stages = Set(SleepStagerV2.stageEpochs(feats))
+        XCTAssertTrue(stages.contains("deep"))
+        XCTAssertTrue(stages.contains("rem"))
     }
 }

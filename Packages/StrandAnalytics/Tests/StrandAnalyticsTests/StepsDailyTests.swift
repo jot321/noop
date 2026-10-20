@@ -56,9 +56,10 @@ final class StepsDailyTests: XCTestCase {
     }
 
     func testJumpGuardDropsGapButKeepsRealSteps() {
-        // 100 -> 300 (=200 real) ; 300 -> 1200 is a 900-tick GAP (>= 512) and is dropped ; 1200 -> 1500
-        // (=300 real). Only the two in-range increments count => 200 + 300 = 500, the gap doesn't inflate.
-        let s = [step(0, 100), step(60, 300), step(3_600, 1_200), step(3_660, 1_500)]
+        // 100 -> 300 (=200 real over 60 s) ; 300 -> 1200 is a 900-tick GAP (>= 512) and is dropped ;
+        // 1200 -> 1500 (=300 real over 100 s). Only the two in-range increments count => 200 + 300 = 500,
+        // the gap doesn't inflate. (Both cadences stay under the 4-steps/s cap, audit A12.)
+        let s = [step(0, 100), step(60, 300), step(3_600, 1_200), step(3_700, 1_500)]
         XCTAssertEqual(stepsFor(s), 500)
     }
 
@@ -67,7 +68,8 @@ final class StepsDailyTests: XCTestCase {
         // code summed the raw running total (here, byte @57 alone summed) — exploding the count; the NEW
         // wrap-aware diff sums only the per-record increments and yields a sane number.
         let counters = [100, 127, 127, 130, 131, 131, 140, 152, 160, 175]
-        let samples = counters.enumerated().map { step($0.offset, $0.element) }
+        // 10 s apart, so every increment is a plausible cadence under the 4-steps/s cap (audit A12).
+        let samples = counters.enumerated().map { step($0.offset * 10, $0.element) }
         // NEW behaviour: sum of wrap-aware deltas == last - first (all small increments, none >= 512).
         let sane = counters.last! - counters.first!  // 75
         XCTAssertEqual(stepsFor(samples), sane)
@@ -140,5 +142,18 @@ final class StepsDailyTests: XCTestCase {
         // explode it. 120 / 0.5 = 240 even when the profile says 0.1.
         let s = [step(0, 100), step(60, 150), step(120, 220)]
         XCTAssertEqual(stepsFor(s, ticksPerStep: 0.1), 240)
+    }
+
+    func testImpossibleOneSecondJumpsAreCappedAtFourSteps() {
+        // Audit A12: the 5/MG counter jumps by 5+ within one second far too often to be steps. Three
+        // 1 s increments of 7 count as 4 each (12), not 21.
+        let s = [step(0, 100), step(1, 107), step(2, 114), step(3, 121)]
+        XCTAssertEqual(stepsFor(s), 12)
+    }
+
+    func testCapScalesWithElapsedTime() {
+        // 30 steps over 10 s (3/s) is a real brisk walk and passes untouched.
+        let s = [step(0, 100), step(10, 130)]
+        XCTAssertEqual(stepsFor(s), 30)
     }
 }

@@ -115,30 +115,66 @@ public enum HRVAnalyzer {
     ///
     /// NOTE: this replaces neurokit2's Kubios classifier (see file header).
     public static func rejectEctopic(_ nn: [Double]) -> [Double] {
-        guard nn.count > ectopicWindowRadius else { return nn }
-        var kept: [Double] = []
-        kept.reserveCapacity(nn.count)
+        zip(nn, ectopicKeep(nn)).filter { $0.1 }.map { $0.0 }
+    }
+
+    /// Per-beat keep flags for `rejectEctopic` (true = kept), parallel to `nn`.
+    static func ectopicKeep(_ nn: [Double]) -> [Bool] {
+        guard nn.count > ectopicWindowRadius else { return Array(repeating: true, count: nn.count) }
+        var keep = Array(repeating: true, count: nn.count)
         for i in 0..<nn.count {
             let lo = max(0, i - ectopicWindowRadius)
             let hi = min(nn.count - 1, i + ectopicWindowRadius)
             var neighbours: [Double] = []
             neighbours.reserveCapacity(hi - lo)
             for j in lo...hi where j != i { neighbours.append(nn[j]) }
-            guard neighbours.count >= 2 else { kept.append(nn[i]); continue }
+            guard neighbours.count >= 2 else { continue }
             let med = median(neighbours)
-            if med <= 0 { kept.append(nn[i]); continue }
-            let deviation = abs(nn[i] - med) / med
-            if deviation <= ectopicThreshold {
-                kept.append(nn[i])
-            }
-            // else: drop this beat as ectopic.
+            if med <= 0 { continue }
+            if abs(nn[i] - med) / med > ectopicThreshold { keep[i] = false }   // ectopic
         }
-        return kept
+        return keep
     }
 
     /// Full clean: range filter → ectopic rejection. Returns the clean NN series.
     public static func cleanRR(_ rr: [Double]) -> [Double] {
         rejectEctopic(rangeFilter(rr))
+    }
+
+    /// `cleanRR` as per-beat keep flags parallel to `rr` (same range + ectopic rules), so a caller can
+    /// tell which neighbours were removed.
+    public static func cleanMask(_ rr: [Double]) -> [Bool] {
+        var mask = rr.map { $0 >= rrMinMs && $0 <= rrMaxMs }
+        let inRange = mask.indices.filter { mask[$0] }
+        for (k, keep) in ectopicKeep(inRange.map { rr[$0] }).enumerated() where !keep {
+            mask[inRange[k]] = false
+        }
+        return mask
+    }
+
+    // MARK: - Adjacent successive differences (audit A6, 2026-10-21)
+
+    /// Successive differences between beats that were ADJACENT in the recording: both survive cleaning
+    /// and no beat between them was rejected. Differencing the compacted clean series instead joined
+    /// beats either side of a rejected one, which inflated rMSSD. When `ts` (unix seconds, parallel to
+    /// `rr`) is given, a pair is also skipped when a time gap separates the beats, i.e. the later beat
+    /// arrives more than its own interval plus 1 s (timestamp rounding) after the earlier one; sparse
+    /// R-R otherwise differences beats minutes apart.
+    public static func adjacentDiffs(_ rr: [Double], ts: [Int]? = nil) -> [Double] {
+        guard rr.count >= 2 else { return [] }
+        let keep = cleanMask(rr)
+        var out: [Double] = []
+        for i in 1..<rr.count where keep[i] && keep[i - 1] {
+            if let ts, i < ts.count, Double(ts[i] - ts[i - 1]) > rr[i] / 1000.0 + 1.0 { continue }
+            out.append(rr[i] - rr[i - 1])
+        }
+        return out
+    }
+
+    /// rMSSD over pre-computed successive differences (ms); nil when there are none.
+    public static func rmssd(diffs: [Double]) -> Double? {
+        guard !diffs.isEmpty else { return nil }
+        return (diffs.reduce(0) { $0 + $1 * $1 } / Double(diffs.count)).squareRoot()
     }
 
     // MARK: - Windowed analysis
@@ -157,7 +193,7 @@ public enum HRVAnalyzer {
             return true
         }
         let raw = inWindow.map { Double($0.rrMs) }
-        return analyze(rawRR: raw)
+        return analyze(rawRR: raw, ts: inWindow.map(\.ts))
     }
 
     /// Compute HRV from raw RR-interval values (ms), applying the full cleaning
@@ -168,7 +204,10 @@ public enum HRVAnalyzer {
     ///   even when `minBeats` clean intervals survive — because a short live capture that threw away most
     ///   of its beats is too noisy to trust. nil (the default, and what the NIGHTLY windowed path passes)
     ///   skips the gate entirely, so the nightly RMSSD is byte-identical to before this parameter existed.
-    public static func analyze(rawRR: [Double], maxRejectedFraction: Double? = nil) -> HRVResult {
+    /// - Parameter ts: optional unix seconds parallel to `rawRR`; when given, beats separated by a time
+    ///   gap are not differenced (see `adjacentDiffs`). A contiguous live capture can omit it.
+    public static func analyze(rawRR: [Double], ts: [Int]? = nil,
+                               maxRejectedFraction: Double? = nil) -> HRVResult {
         let nInput = rawRR.count
         let clean = cleanRR(rawRR)
         guard clean.count >= minBeats else {
@@ -182,16 +221,17 @@ public enum HRVAnalyzer {
                 return .empty(nInput: nInput)
             }
         }
-        let rmssd = rmssdRaw(clean)
+        // rMSSD and pNN50 come from ADJACENT beats only (audit A6); SDNN and mean NN are order-free.
+        let diffs = adjacentDiffs(rawRR, ts: ts)
+        let rmssdValue = Self.rmssd(diffs: diffs)
         let sdnn = sdnnRaw(clean)
         let mean = clean.reduce(0, +) / Double(clean.count)
 
-        // pNN50 over the clean NN series.
-        var nn50 = 0
-        for i in 1..<clean.count where abs(clean[i] - clean[i - 1]) > 50.0 { nn50 += 1 }
-        let pnn50 = Double(nn50) / Double(clean.count - 1) * 100.0
+        // pNN50 over the adjacent successive differences.
+        let pnn50: Double? = diffs.isEmpty
+            ? nil : Double(diffs.filter { abs($0) > 50.0 }.count) / Double(diffs.count) * 100.0
 
-        return HRVResult(rmssd: rmssd, sdnn: sdnn, meanNN: mean, pnn50: pnn50,
+        return HRVResult(rmssd: rmssdValue, sdnn: sdnn, meanNN: mean, pnn50: pnn50,
                          nInput: nInput, nClean: clean.count)
     }
 
@@ -229,7 +269,9 @@ public enum HRVAnalyzer {
                                     stepSec: Int = 0,
                                     minBeatsPerWindow: Int = 8) -> [RollingRmssdPoint] {
         guard windowSec > 0, rr.count >= minBeatsPerWindow else { return [] }
-        let sorted = rr.sorted { $0.ts < $1.ts }
+        // Stable by ts: beats sharing a second keep their arrival order (audit A6).
+        let sorted = rr.enumerated().sorted { ($0.element.ts, $0.offset) < ($1.element.ts, $1.offset) }
+            .map(\.element)
         var out: [RollingRmssdPoint] = []
         var lastEmitTs: Int? = nil
         var left = 0   // index of the oldest interval still inside the trailing window
@@ -241,9 +283,11 @@ public enum HRVAnalyzer {
             if stepSec > 0, let last = lastEmitTs, edgeTs - last < stepSec { continue }
             // Clean the window's raw R-R values with the shared range + Malik ectopic pipeline, then
             // require enough survivors before trusting a windowed rMSSD.
-            let windowRaw = sorted[left...right].map { Double($0.rrMs) }
-            let clean = cleanRR(windowRaw)
-            guard clean.count >= minBeatsPerWindow, let r = rmssdRaw(clean) else { continue }
+            let window = sorted[left...right]
+            let windowRaw = window.map { Double($0.rrMs) }
+            let cleanCount = cleanMask(windowRaw).filter { $0 }.count
+            guard cleanCount >= minBeatsPerWindow,
+                  let r = rmssd(diffs: adjacentDiffs(windowRaw, ts: window.map(\.ts))) else { continue }
             out.append(RollingRmssdPoint(ts: edgeTs, rmssd: r))
             lastEmitTs = edgeTs
         }

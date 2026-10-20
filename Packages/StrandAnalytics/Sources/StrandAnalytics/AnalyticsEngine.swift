@@ -50,6 +50,16 @@ public enum AnalyticsEngine {
         }
     }
 
+    /// Fastest plausible step cadence (steps per second); sprinting tops out near 4.
+    public static let maxStepsPerSecond = 4
+
+    /// One step-counter increment between two records, capped at `maxStepsPerSecond` per elapsed second
+    /// (at least one second). The 5/MG counter jumps by 5+ within a single second far too often to be
+    /// steps; uncapped, those jumps inflated daily totals by roughly 25-35%. (Audit A12, 2026-10-21.)
+    public static func cappedStepIncrement(_ delta: Int, elapsedSec: Int) -> Int {
+        min(delta, maxStepsPerSecond * max(1, elapsedSec))
+    }
+
     /// The full analysis result for one day.
     ///
     /// NOTE: not `Sendable` — it embeds `DailyMetric` / `CachedSleepSession` from
@@ -563,7 +573,9 @@ public enum AnalyticsEngine {
             var total = 0
             for i in 1..<sorted.count {
                 let delta = (sorted[i].counter - sorted[i - 1].counter) & 0xFFFF  // wrap-aware u16 increment
-                if delta >= 1 && delta < maxStepDelta { total += delta }  // ignore a delta >= 512 (gap/reset)
+                if delta >= 1 && delta < maxStepDelta {  // ignore a delta >= 512 (gap/reset)
+                    total += Self.cappedStepIncrement(delta, elapsedSec: sorted[i].ts - sorted[i - 1].ts)
+                }
             }
             if total <= 0 { return nil }
             // @57 counts motion ticks, not validated steps — the 5/MG counter overcounts. Divide

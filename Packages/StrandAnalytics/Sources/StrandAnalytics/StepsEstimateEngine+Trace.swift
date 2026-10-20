@@ -120,7 +120,7 @@ extension StepsEstimateEngine {
         for i in 1..<sorted.count {
             let delta = (sorted[i].counter - sorted[i - 1].counter) & 0xFFFF  // wrap-aware u16 increment
             if delta >= 1 && delta < maxStepDelta {
-                rawTotal += delta
+                rawTotal += AnalyticsEngine.cappedStepIncrement(delta, elapsedSec: sorted[i].ts - sorted[i - 1].ts)
                 keptDeltas += 1
                 minDelta = Swift.min(minDelta, delta)
                 maxDelta = Swift.max(maxDelta, delta)

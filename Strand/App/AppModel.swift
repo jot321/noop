@@ -454,6 +454,9 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
             // history once, so any deep-history rows an older build left on the 0–21 axis regenerate on
             // the 0–100 axis. Guarded by a persisted flag, so this is a no-op on every subsequent launch.
             await self.intelligence.runEffortRescoreIfNeeded()
+            // One-shot rescore after the October 2026 calculation fixes, so days older than the 21-day
+            // window get the corrected numbers too. Persisted flag; a no-op on every later launch.
+            await self.intelligence.runAuditRescoreIfNeeded()
             while !Task.isCancelled {
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after
@@ -552,7 +555,9 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
         // analyzeRecent tick , otherwise a just-synced night's Charge / Effort / Rest can take up to
         // 15 minutes to appear on a strap-only (no-import) dashboard. analyzeRecent no-ops if a tick is
         // already running and refreshes the dashboard itself once the new scores persist. (PR #218)
-        await intelligence.analyzeRecent()
+        // Widen the pass when the sync delivered days older than the usual window (audit A15).
+        let rescoreDays = await intelligence.rescoreDaysAfterBackfill()
+        await intelligence.analyzeRecent(maxDays: rescoreDays)
         await refreshV5Signals()
         #if os(iOS)
         // #980: a strap backfill routinely completes while the app is BACKGROUNDED (it runs as a

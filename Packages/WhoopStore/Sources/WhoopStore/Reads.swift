@@ -97,12 +97,31 @@ extension WhoopStore {
         }
     }
 
+    /// HR sample count per LOCAL day index, floor((ts + offsetSec) / 86400), for ts in [from, to]. One
+    /// indexed GROUP BY, no rows materialised; lets the engine find backfilled days that were never
+    /// scored. (Audit A15, 2026-10-21.)
+    public func hrDayCounts(deviceId: String, from: Int, to: Int, offsetSec: Int) async throws -> [Int: Int] {
+        try syncRead { db in
+            var out: [Int: Int] = [:]
+            for row in try Row.fetchAll(db, sql: """
+                SELECT (ts + ?) / 86400 AS d, COUNT(*) AS c FROM hrSample
+                WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                GROUP BY d
+                """, arguments: [offsetSec, deviceId, from, to]) {
+                out[row["d"]] = row["c"]
+            }
+            return out
+        }
+    }
+
     public func rrIntervals(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [RRInterval] {
+        // Within one second, rowid is arrival (beat) order. Sorting by rrMs instead reordered beats by
+        // size, which inflated rMSSD's successive differences (audit A6, 2026-10-21).
         try syncRead { db in
             try Row.fetchAll(db, sql: """
                 SELECT ts, rrMs FROM rrInterval
                 WHERE deviceId = ? AND ts >= ? AND ts <= ?
-                ORDER BY ts ASC, rrMs ASC LIMIT ?
+                ORDER BY ts ASC, rowid ASC LIMIT ?
                 """, arguments: [deviceId, from, to, limit])
                 .map { RRInterval(ts: $0["ts"], rrMs: $0["rrMs"]) }
         }
