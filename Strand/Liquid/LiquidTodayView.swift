@@ -49,6 +49,7 @@ struct LiquidTodayView: View {
 
     // sheets / expanders
     @State private var guideSection: ScoreSection?
+    @State private var showChargeDetail = false
     @State private var showCustomise = false
     @State private var showSettings = false
     @State private var showSupport = false
@@ -302,6 +303,9 @@ struct LiquidTodayView: View {
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
         }
+        .sheet(isPresented: $showChargeDetail) {
+            NavigationStack { chargeDetail }
+        }
         .sheet(isPresented: $showCustomise) {
             DashboardCardsEditorSheet(selectionRaw: $dashboardCardsRaw)
         }
@@ -436,12 +440,37 @@ struct LiquidTodayView: View {
     private var heroCard: some View {
         HStack(alignment: .top, spacing: 0) {
             MinimalScoreCell(label: "Charge", score: displayDay?.recovery, tint: StrandPalette.chargeColor,
-                             onGuide: { guideSection = .charge })
+                             onGuide: { showChargeDetail = true })
             MinimalScoreCell(label: "Effort", score: displayDay?.strain, tint: StrandPalette.effortColor,
                              onGuide: { guideSection = .effort })
             MinimalScoreCell(label: "Rest", score: restScore, tint: StrandPalette.restColor,
                              onGuide: { guideSection = .rest })
         }
+    }
+
+    /// The Charge ring's detail page. Built only while the sheet is open: the drivers fold the HRV, RHR
+    /// and breathing baselines from repo.days (the inputs the score used), which is too much for body.
+    private var chargeDetail: some View {
+        let row = displayDay
+        var drivers: [ChargeDriver] = []
+        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+        if let row, let hrv = row.avgHrv, let rhr = row.restingHr, hrvBase.usable {
+            let rhrBase = Baselines.foldHistory(repo.days.map { $0.restingHr.map(Double.init) },
+                                                cfg: Baselines.restingHRCfg)
+            let respBase = Baselines.foldHistory(repo.days.map(\.respRateBpm), cfg: Baselines.respCfg)
+            drivers = RecoveryScorer.chargeDrivers(
+                hrv: hrv, rhr: Double(rhr), resp: row.respRateBpm,
+                hrvBaseline: hrvBase,
+                rhrBaseline: rhrBase.usable ? rhrBase : nil,
+                respBaseline: respBase.usable ? respBase : nil,
+                sleepPerf: restScore.map { $0 / 100.0 }, skinTempDev: row.skinTempDevC)
+        }
+        return ScoreDetailView(
+            title: String(localized: "Charge"), score: row?.recovery, tint: StrandPalette.chargeColor,
+            verdict: synthLine, note: chargeCalibrationNote, drivers: drivers,
+            confidence: ScoreConfidence.charge(recovery: row?.recovery, hrvBaseline: hrvBase),
+            skinTempRel: RecoveryScorer.skinTempRelative(deviationC: row?.skinTempDevC),
+            guide: .charge, onClose: { showChargeDetail = false })
     }
 
     /// One sentence under the rings: the synthesis line, plus the cold-start note while Charge warms up.

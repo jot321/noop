@@ -164,18 +164,13 @@ struct ConfidenceTierChip: View {
         HStack(spacing: 6) {
             Circle()
                 .fill(hue)
-                .frame(width: 7, height: 7)
-                .shadow(color: hue.opacity(0.8), radius: 2)
+                .frame(width: 6, height: 6)
                 .accessibilityHidden(true)
             Text(tag)
                 .font(StrandFont.overline)
                 .tracking(0.4)
-                .foregroundStyle(hue)
+                .foregroundStyle(StrandPalette.textSecondary)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Capsule(style: .continuous).fill(hue.opacity(0.12)))
-        .overlay(Capsule(style: .continuous).stroke(hue.opacity(0.32), lineWidth: 1))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibility)
     }
@@ -203,7 +198,6 @@ struct ChargeBreakdownSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-            Divider().overlay(StrandPalette.hairline)
             HStack(alignment: .firstTextBaseline) {
                 Text("What shaped it").strandOverline()
                 Spacer()
@@ -235,7 +229,6 @@ struct ChargeDriverRow: View {
     var maxMagnitude: Int? = nil
 
     private var chipText: String { ChargeBreakdownFormat.chipLabel(deltaPoints: driver.deltaPoints) }
-    private var chipHue: Color { ChargeBreakdownFormat.chipColor(deltaPoints: driver.deltaPoints) }
     private var magnitude: Double { Double(abs(driver.deltaPoints)) }
     private var barMax: Double { Double(max(1, maxMagnitude ?? abs(driver.deltaPoints))) }
 
@@ -246,12 +239,10 @@ struct ChargeDriverRow: View {
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textPrimary)
                 Spacer(minLength: 8)
-                // The signed point-delta chip , green for a supporting term, red for a limiting one.
+                // The signed point delta as plain text (minimal redesign: the sign carries direction).
                 Text(chipText)
                     .font(StrandFont.captionNumber)
-                    .foregroundStyle(chipHue)
-                    .padding(.horizontal, 8).padding(.vertical, 2)
-                    .background(chipHue.opacity(0.14), in: Capsule(style: .continuous))
+                    .foregroundStyle(StrandPalette.textSecondary)
             }
             // value vs baseline , the baseline line is omitted for terms with no learned baseline.
             HStack(spacing: 6) {
@@ -267,7 +258,8 @@ struct ChargeDriverRow: View {
                 Spacer(minLength: 0)
             }
             // A thin magnitude bar tinted to the chip hue, reading the term's share of the biggest mover.
-            PipBar(value: magnitude, range: 0...barMax, segments: 16, tint: chipHue, height: 6)
+            PipBar(value: magnitude, range: 0...barMax, segments: 16,
+                   tint: driver.deltaPoints < 0 ? StrandPalette.textTertiary : StrandPalette.accent, height: 6)
                 .accessibilityHidden(true)
             Text(LocalizedStringKey(driver.verdict))
                 .font(StrandFont.footnote)
@@ -355,35 +347,29 @@ struct SkinTempDeviationRow: View {
 struct ChargeBreakdownDemoHost: View {
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: NoopMetrics.gap) {
-                    NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
-                        ChargeBreakdownSection(
-                            drivers: [
-                                ChargeDriver(label: "Heart rate variability", deltaPoints: 9,
-                                             valueText: "78 ms", baselineText: "62 ms baseline",
-                                             verdict: "above baseline, supporting recovery"),
-                                ChargeDriver(label: "Resting heart rate", deltaPoints: 4,
-                                             valueText: "53 bpm", baselineText: "58 bpm baseline",
-                                             verdict: "below baseline, supporting recovery"),
-                                ChargeDriver(label: "Sleep quality", deltaPoints: 2,
-                                             valueText: "91%", baselineText: "",
-                                             verdict: "a strong night, supporting recovery"),
-                                ChargeDriver(label: "Respiratory rate", deltaPoints: 1,
-                                             valueText: "14.2 br/min", baselineText: "15.0 br/min baseline",
-                                             verdict: "below baseline, supporting recovery"),
-                                ChargeDriver(label: "Skin temperature", deltaPoints: -1,
-                                             valueText: "+0.4 C vs baseline", baselineText: "",
-                                             verdict: "warmer than baseline, limiting recovery"),
-                            ],
-                            confidence: .solid,
-                            skinTempRel: SkinTempRelative(deviationC: 0.4, tier: .warmer))
-                    }
-                }
-                .padding(NoopMetrics.screenPadding)
-            }
-            .background(StrandPalette.surfaceBase)
-            .navigationTitle("What shaped your Charge")
+            ScoreDetailView(
+                title: "Charge", score: 74, tint: StrandPalette.chargeColor,
+                verdict: "You're in a good spot for training.",
+                drivers: [
+                    ChargeDriver(label: "Heart rate variability", deltaPoints: 9,
+                                 valueText: "78 ms", baselineText: "62 ms baseline",
+                                 verdict: "above baseline, supporting recovery"),
+                    ChargeDriver(label: "Resting heart rate", deltaPoints: 4,
+                                 valueText: "53 bpm", baselineText: "58 bpm baseline",
+                                 verdict: "below baseline, supporting recovery"),
+                    ChargeDriver(label: "Sleep quality", deltaPoints: 2,
+                                 valueText: "91%", baselineText: "",
+                                 verdict: "a strong night, supporting recovery"),
+                    ChargeDriver(label: "Respiratory rate", deltaPoints: 1,
+                                 valueText: "14.2 br/min", baselineText: "15.0 br/min baseline",
+                                 verdict: "below baseline, supporting recovery"),
+                    ChargeDriver(label: "Skin temperature", deltaPoints: -1,
+                                 valueText: "+0.4 C vs baseline", baselineText: "",
+                                 verdict: "warmer than baseline, limiting recovery"),
+                ],
+                confidence: .solid,
+                skinTempRel: SkinTempRelative(deviationC: 0.4, tier: .warmer),
+                guide: .charge, onClose: {})
         }
         .preferredColorScheme(.dark)
     }
