@@ -84,7 +84,15 @@ public struct MinimalLine: View {
 
     public var body: some View {
         Canvas { ctx, size in
-            guard values.count >= 2 else { return }
+            guard values.count >= 2 else {
+                // Not enough points for a line: a faint dashed baseline so the tile doesn't look broken.
+                var p = Path()
+                p.move(to: CGPoint(x: 2, y: size.height / 2))
+                p.addLine(to: CGPoint(x: size.width - 2, y: size.height / 2))
+                ctx.stroke(p, with: .color(StrandPalette.hairlineStrong),
+                           style: StrokeStyle(lineWidth: 1, lineCap: .round, dash: [3, 4]))
+                return
+            }
             let lo = values.min() ?? 0, hi = values.max() ?? 1
             let span = max(minSpan, hi - lo), mid = (hi + lo) / 2
             let pad = Double(lineWidth) + 2
