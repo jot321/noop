@@ -1,5 +1,7 @@
 # SideStore Release and Upgrade Guide
 
+> **Retired on 2026-10-19.** NOOP is now installed and renewed from the Mac with `Tools/noop-phone.sh`; see `docs/LOCAL_IPHONE_SETUP.md`. This guide is kept for its backup and rollback steps.
+
 This guide builds a personal NOOP `.ipa`, upgrades the existing SideStore-managed installation, and verifies that its on-device database survived. Run commands from the repository root.
 
 ## Safety model

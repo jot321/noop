@@ -256,7 +256,10 @@ targets:
           - $(APP_GROUP_ID)
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.jotsarup.noop
+        # SideStore installed NOOP under this suffixed ID, and that ID owns the on-phone database.
+        # Building with the same ID and team makes an Xcode install upgrade it in place
+        # (docs/LOCAL_IPHONE_SETUP.md). Changing it means a new, empty container.
+        PRODUCT_BUNDLE_IDENTIFIER: com.jotsarup.noop.B6925R5WYB
         PRODUCT_NAME: NOOP
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Ship every *.appiconset (not just the primary AppIcon) so the alternate "AppIcon-Navy"
@@ -310,7 +313,7 @@ targets:
           - $(APP_GROUP_ID)
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.jotsarup.noop.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: com.jotsarup.noop.B6925R5WYB.widgets
         PRODUCT_NAME: NOOPWidgets
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"

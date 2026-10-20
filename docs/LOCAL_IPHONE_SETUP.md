@@ -4,6 +4,64 @@ This document records the owner-specific configuration used to build, sign, inst
 NOOP on Jot's iPhone. It belongs in the `jot321/noop` fork; the signing values are not intended for
 the canonical upstream repository.
 
+## Current Install Method (since 2026-10-20)
+
+NOOP is installed from the Mac with Xcode's free Personal Team. SideStore and LocalDevVPN are no
+longer used. SideStore 0.6.4 and earlier lost Apple sign-in in September 2026, so the SideStore
+build expired and stopped collecting on 22 Jul 2026. Every SideStore upgrade had also needed manual
+VPN, disk-image and extension fixes.
+
+- The app keeps SideStore's bundle identifier, `com.jotsarup.noop.B6925R5WYB`, and the widget keeps
+  `com.jotsarup.noop.B6925R5WYB.widgets`. Same identifier and same team means the install upgrades
+  the SideStore-installed app in place and keeps its database. This was verified on 2026-10-20: the
+  row counts were identical before and after. Do not change these IDs, because a different
+  identifier installs a second app with an empty container.
+- The Xcode build also restores the App Group entitlement (`group.com.jotsarup.noop`). SideStore had
+  stripped it, so the widget never received data under SideStore.
+- `Tools/noop-phone.sh` does the whole cycle:
+  1. Back up `Library`. The script refuses to continue unless SQLite `quick_check` is `ok`.
+  2. Copy the checkout to `~/.noop-phone/src`.
+  3. Build Release for generic iOS with `-allowProvisioningUpdates`.
+  4. Check the bundle ID, and check that the new profile still lists this iPhone.
+  5. Install over the existing app.
+  6. Try to relaunch it.
+- Phone access uses pymobiledevice3 (`uvx pymobiledevice3@11.40.1`, nothing installed): house_arrest
+  for the backup and installation_proxy for the install. Both work over USB or the same Wi-Fi, with
+  the phone locked. Xcode's `devicectl` and device-destination builds are avoided because they need
+  the developer disk image, which mounts only while the phone is unlocked. Only the relaunch uses
+  `devicectl`, so it is best effort.
+- A launchd job, `com.jot.noop-phone`, runs `~/.noop-phone/bin/noop-phone.sh auto` at 10:20, 13:20,
+  16:20 and 19:20. It does nothing until fewer than 3 days remain on the 7-day profile. It then
+  renews from `~/.noop-phone/src` (the last installed source, not the working tree). It sends a
+  macOS notification if the phone is not reachable, if the renewal fails, or if NOOP needs opening
+  after a renewal.
+- Everything the job touches lives in `~/.noop-phone`:
+  - the source copy and DerivedData;
+  - backups: the four newest dated ones, plus `2026-10-20-212748-pre-xcode`, which is never pruned;
+  - logs and state.
+
+  Background jobs cannot read `~/Desktop` under macOS privacy controls. The iPhone's UDID lives in
+  `~/.noop-phone/config`, outside Git.
+
+Day-to-day commands, run from the repository root:
+
+```bash
+Tools/noop-phone.sh status            # phone reachable?, installed build, days left
+Tools/noop-phone.sh install           # ship committed dev to the phone (backup first)
+Tools/noop-phone.sh install --allow-dirty   # ship uncommitted work while iterating
+Tools/noop-phone.sh backup            # copy the app's Library to ~/.noop-phone/backups
+Tools/noop-phone.sh setup             # (re)install the runtime copy and the launchd job
+```
+
+When a renewal runs, the phone must be cabled, or on the same Wi-Fi as the Mac with "Show this
+iPhone when on Wi-Fi" enabled. Installing stops NOOP. If the relaunch fails, open NOOP by hand.
+The free team's limits still apply: 3 apps per device (NOOP and its widget use 2), and 10 App IDs
+per 7 days. If the profile check fails, the iPhone's registration on the team has lapsed. Unlock
+the phone, open Xcode > Window > Devices and Simulators so Xcode registers it again, then run
+`Tools/noop-phone.sh renew`.
+
+`docs/SIDESTORE_RELEASE.md` describes the retired SideStore method and is kept for reference.
+
 ## Locations
 
 - Local repository: `/Users/jotsarup/Desktop/experiments/noop`
