@@ -75,34 +75,11 @@ public struct PipBar: View {
     private var pipCount: Int { max(1, segments) }
 
     public var body: some View {
-        // Gap scales with height so the bar reads consistently at any size; pips stay rounded (rx ~2.5).
-        let gap: CGFloat = max(2, height * 0.28)
-        let corner: CGFloat = 2.5
-
-        // Precompute the three constant colours ONCE per body eval rather than re-deriving them inside
-        // every one of the (default 24) segment closures: the inset track, the plain tint, and the
-        // brightened lead-edge tint (which itself runs an interpolate → Color(hex:) allocation). Combined
-        // with the Palette memoization this removes the per-segment colour allocations across the bar.
-        let track = StrandPalette.surfaceInset
-        let leadBase = brighten(tint)
-
-        HStack(spacing: gap) {
-            ForEach(0..<pipCount, id: \.self) { index in
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .fill(fillStyle(for: index, track: track, leadBase: leadBase))
-            }
-        }
-        .frame(height: height)
-        .onAppear {
-            // Count-up on first appear (or snap when Reduce Motion is on).
-            withAnimation(countUp) { animatedFraction = targetFraction }
-        }
-        .onChangeCompat(of: value) { _ in
-            // Re-run the cascade whenever the value changes.
-            withAnimation(countUp) { animatedFraction = targetFraction }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityValue(Text(axValue))
+        // Minimal redesign (2026-10-21): one flat capsule filled to the value, no segmented pips and no
+        // left-to-right cascade. `segments` stays in the API so call sites compile.
+        _ = (pipCount, countUp, animatedFraction)
+        return MinimalBar(frac: targetFraction, tint: tint, height: height * 0.7)
+            .frame(height: height)
     }
 
     /// The fill for a single segment, derived from the one animated fraction.

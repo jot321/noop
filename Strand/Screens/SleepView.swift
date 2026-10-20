@@ -124,17 +124,18 @@ struct SleepView: View {
                        topBackground: liquidScaffoldSky()) {
             Group {
                 if let resolved {
-                    // Each top-level section fades + rises in sequence on first appear (Reduce-Motion safe).
+                    // Minimal redesign (2026-10-21): the night first (times + stage timeline), then its
+                    // score and details; logging sits lower. No staggered entrance — content appears at once.
                     VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                         if let sleepUndo { sleepUndoBanner(sleepUndo) }
-                        restHero(resolved).staggeredAppear(index: 0)
-                        SleepMarkCard().staggeredAppear(index: 1)
-                        hero(resolved).staggeredAppear(index: 2)
-                        metricGrid(resolved).staggeredAppear(index: 3)
-                        sleepDebtLedger(resolved).staggeredAppear(index: 4)
-                        stagesVsTypical(resolved).staggeredAppear(index: 5)
-                        durationTrend(resolved).staggeredAppear(index: 6)
-                        SleepAnalyticsCard().staggeredAppear(index: 7)
+                        hero(resolved)
+                        restHero(resolved)
+                        metricGrid(resolved)
+                        stagesVsTypical(resolved)
+                        sleepDebtLedger(resolved)
+                        durationTrend(resolved)
+                        SleepMarkCard()
+                        SleepAnalyticsCard()
                     }
                 } else {
                     emptyState

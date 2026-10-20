@@ -151,7 +151,7 @@ public struct Hypnogram: View {
                                     p.move(to: CGPoint(x: 0, y: y))
                                     p.addLine(to: CGPoint(x: geo.size.width, y: y))
                                 }
-                                .stroke(StrandPalette.hairline.opacity(0.4), lineWidth: 1)
+                                .stroke(StrandPalette.hairline.opacity(0.3), lineWidth: 1)
                             }
 
                             // time-axis vertical hairlines: onset · midpoint · wake
@@ -166,8 +166,8 @@ public struct Hypnogram: View {
                                 }
                             }
 
-                            // connecting risers
-                            risers(in: geo.size)
+                            // Minimal redesign (2026-10-21): no connecting risers — each stage reads as
+                            // blocks on its own row, which is calmer and easier to scan.
 
                             // stage bands (visual only — a11y is the single collapsed plot summary below)
                             ForEach(Array(intervals.enumerated()), id: \.element.id) { idx, interval in
@@ -176,7 +176,7 @@ public struct Hypnogram: View {
                                 let dimmed = hoverIndex != nil && hoverIndex != idx
                                 // Design Reset (WHOOP): NO REM bloom — every stage band is a flat, crisp
                                 // solid pill; fill-contrast (not a glow) separates the four stages.
-                                RoundedRectangle(cornerRadius: rect.height / 2)
+                                RoundedRectangle(cornerRadius: min(3, rect.height / 2), style: .continuous)
                                     .fill(color)
                                     .frame(width: rect.width, height: rect.height)
                                     .opacity(dimmed ? 0.45 : 1.0)
@@ -293,11 +293,11 @@ public struct Hypnogram: View {
         let x1 = CGFloat((interval.end - origin) / span) * size.width
         // Row-proportional thickness (floored) so bands fill the tall row gaps.
         let rowStep = size.height / CGFloat(rowCount)
-        let thickness = max(NoopMetrics.hypnogramBandMinThickness, rowStep * 0.40)
-        // Floor the WIDTH at the thickness and centre the band on its interval, so a brief stage —
-        // especially a short Awake blip — reads as a rounded pill/dot rather than a thin glitch tick.
+        let thickness = max(NoopMetrics.hypnogramBandMinThickness, rowStep * 0.55)
+        // Width is the interval's real duration (floored at 3pt so a brief stage stays visible); the
+        // old floor at the band thickness made short blips read longer than they were.
         let mid = (x0 + x1) / 2
-        let width = max(thickness, x1 - x0)
+        let width = max(3, x1 - x0)
         let y = rowY(interval.stage.bandRank, in: size.height)
         return CGRect(x: mid - width / 2, y: y - thickness / 2, width: width, height: thickness)
     }
