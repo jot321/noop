@@ -798,6 +798,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// pick so restoration/reconnect after a relaunch target the right strap.
     private var selectedModel: WhoopModel = .persisted
     private var lastStandardHRLogAt: Date?
+    /// Last plausible 0x2A37 reading; nil until one arrives. Gates 5/MG REALTIME_DATA persistence.
+    private var lastStandardHRAt: Date?
+    /// Logged once per silent stretch so the strap log shows which source is persisting live HR.
+    private var loggedRealtimePersistence = false
 
     /// True when the selected/connected strap is a WHOOP 5/MG. Read-only window onto the private
     /// `selectedModel` so a view can tell whether the firmware-alarm path is the experimental 5/MG one
@@ -2749,6 +2753,8 @@ public final class BLEManager: NSObject, ObservableObject {
             return
         }
         let now = Date()
+        // A plausible 0x2A37 reading makes the standard profile the 5/MG persistence source again.
+        if (30...220).contains(m.hr) { lastStandardHRAt = now }
         if lastStandardHRLogAt.map({ now.timeIntervalSince($0) >= 30 }) ?? true {
             lastStandardHRLogAt = now
             let plausibility = (30...220).contains(m.hr) ? "" : " ignored"
@@ -3679,12 +3685,25 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         continue
                     }
                     router.handle(frame: frame)
-                    // NOTE: we deliberately do NOT ingest live 5/MG REALTIME_DATA into the Collector
-                    // here. For a 5/MG the standard 0x2A37 Heart-Rate profile is already the RELIABLE,
-                    // continuously-persisted live source (see didUpdateValueFor 0x2A37 → ingestStandardHR);
-                    // decoding HR a second time off the puffin stream stored a duplicate row per heartbeat
-                    // at a slightly different second (strap-unix vs Mac-receive), inflating the sample
-                    // store. 0x2A37 stays the single authoritative live HR/RR source for 5/MG.
+                    // The standard 0x2A37 Heart-Rate profile is the preferred live HR/RR source for 5/MG
+                    // (see didUpdateValueFor 0x2A37 → ingestStandardHR): persisting both stored a
+                    // duplicate row per heartbeat at a neighbouring second (strap-unix vs receive time).
+                    // But some 5/MG straps never notify 0x2A37, so while it is silent the puffin
+                    // REALTIME_DATA stream is persisted instead; only one source writes at a time. This
+                    // also runs mid-backfill, since these frames are live, not offload.
+                    if Whoop5LiveHRPersistence.isRealtimeDataFrame(frame) {
+                        if Whoop5LiveHRPersistence.persistRealtimeFrames(lastStandardHRAt: lastStandardHRAt,
+                                                                         now: Date()) {
+                            if !loggedRealtimePersistence {
+                                loggedRealtimePersistence = true
+                                log("WHOOP 5/MG: 0x2A37 HR silent — persisting live HR/R-R from REALTIME_DATA")
+                            }
+                            collector?.ingest(frame)
+                        } else if loggedRealtimePersistence {
+                            loggedRealtimePersistence = false
+                            log("WHOOP 5/MG: 0x2A37 HR flowing — it persists live HR/R-R again")
+                        }
+                    }
                     // Capture for protocol mapping (no-op unless the Settings toggle is on). PR #20.
                     puffinRecorder.capture(frame: frame, char: characteristic.uuid)
                 }
