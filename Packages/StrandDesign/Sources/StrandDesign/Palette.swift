@@ -188,32 +188,51 @@ public enum StrandPalette {
     public static var strainGradient: Gradient { Gradient(stops: strainStops) }
 
     // MARK: Sleep stages — the blue "Rest" colour world (Titanium); Classic adds a purple REM.
-    public static var sleepAwake: Color { isClassic ? cSleepAwake : Color(light: "#97A2B2", dark: "#C2CCDA") }
-    public static var sleepLight: Color { isClassic ? cSleepLight : Color(light: "#3A80D6", dark: "#4A90E2") }
-    public static var sleepDeep:  Color { isClassic ? cSleepDeep  : Color(light: "#234F9E", dark: "#2F6FCB") }
-    public static var sleepREM:   Color { isClassic ? cSleepREM   : Color(light: "#5790DA", dark: "#6FA8E8") }
-
+    private static let _sleepAwakeDefault = Color(light: "#97A2B2", dark: "#C2CCDA")
+    public static var sleepAwake: Color { isClassic ? cSleepAwake : _sleepAwakeDefault }
+    private static let _sleepLightDefault = Color(light: "#3A80D6", dark: "#4A90E2")
+    public static var sleepLight: Color { isClassic ? cSleepLight : _sleepLightDefault }
+    private static let _sleepDeepDefault = Color(light: "#234F9E", dark: "#2F6FCB")
+    public static var sleepDeep:  Color { isClassic ? cSleepDeep : _sleepDeepDefault }
+    private static let _sleepREMDefault = Color(light: "#5790DA", dark: "#6FA8E8")
+    public static var sleepREM:   Color { isClassic ? cSleepREM : _sleepREMDefault }
     // MARK: HR zones — Titanium cool→warm (no green), or the Classic grey→green→yellow→orange→red.
-    public static var zone1: Color { isClassic ? cZone1 : Color(light: "#3A80D6", dark: "#4A90E2") }
-    public static var zone2: Color { isClassic ? cZone2 : Color(light: "#2E92B4", dark: "#3FA9C9") }
-    public static var zone3: Color { isClassic ? cZone3 : Color(light: "#C28E26", dark: "#E8B84B") }
-    public static var zone4: Color { isClassic ? cZone4 : Color(light: "#C2792E", dark: "#D98A3D") }
-    public static var zone5: Color { isClassic ? cZone5 : Color(light: "#C84E1E", dark: "#E0662F") }
-
+    private static let _zone1Default = Color(light: "#3A80D6", dark: "#4A90E2")
+    public static var zone1: Color { isClassic ? cZone1 : _zone1Default }
+    private static let _zone2Default = Color(light: "#2E92B4", dark: "#3FA9C9")
+    public static var zone2: Color { isClassic ? cZone2 : _zone2Default }
+    private static let _zone3Default = Color(light: "#C28E26", dark: "#E8B84B")
+    public static var zone3: Color { isClassic ? cZone3 : _zone3Default }
+    private static let _zone4Default = Color(light: "#C2792E", dark: "#D98A3D")
+    public static var zone4: Color { isClassic ? cZone4 : _zone4Default }
+    private static let _zone5Default = Color(light: "#C84E1E", dark: "#E0662F")
+    public static var zone5: Color { isClassic ? cZone5 : _zone5Default }
     /// HR zones indexed 1...5; index 0 mirrors zone1 for convenience.
     public static var hrZones: [Color] { [zone1, zone1, zone2, zone3, zone4, zone5] }
 
     // MARK: Status — Titanium gold/amber/orange, or the Classic green/amber/red.
-    public static var statusPositive: Color { isClassic ? Color(light: "#2E9E4F", dark: "#46B45A") : Color(light: "#1F8A5B", dark: "#03E095") }
-    public static var statusWarning:  Color { isClassic ? Color(light: "#CFA528", dark: "#F2C53D") : Color(light: "#C2792E", dark: "#F0A020") }
-    public static var statusCritical: Color { isClassic ? Color(light: "#CB3A2F", dark: "#E5483B") : Color(light: "#C84E1E", dark: "#E0662F") }
-
+    private static let _statusPositiveClassic = Color(light: "#2E9E4F", dark: "#46B45A")
+    private static let _statusPositiveDefault = Color(light: "#1F8A5B", dark: "#03E095")
+    public static var statusPositive: Color { isClassic ? _statusPositiveClassic : _statusPositiveDefault }
+    private static let _statusWarningClassic = Color(light: "#CFA528", dark: "#F2C53D")
+    private static let _statusWarningDefault = Color(light: "#C2792E", dark: "#F0A020")
+    public static var statusWarning:  Color { isClassic ? _statusWarningClassic : _statusWarningDefault }
+    private static let _statusCriticalClassic = Color(light: "#CB3A2F", dark: "#E5483B")
+    private static let _statusCriticalDefault = Color(light: "#C84E1E", dark: "#E0662F")
+    public static var statusCritical: Color { isClassic ? _statusCriticalClassic : _statusCriticalDefault }
     // MARK: Per-metric accents — HRV / SpO₂ / energy / risk. Classic leans the traditional hues (purple HRV, red risk).
-    public static var metricCyan:   Color { isClassic ? Color(light: "#2E92B4", dark: "#3FA9C9") : Color(light: "#2E92B4", dark: "#3FA9C9") }
-    public static var metricPurple: Color { isClassic ? Color(light: "#6A4FC0", dark: "#8E6FD6") : Color(light: "#3A80D6", dark: "#4A90E2") }
-    public static var metricAmber:  Color { isClassic ? Color(light: "#CFA528", dark: "#F2C53D") : Color(light: "#C2792E", dark: "#D98A3D") }
-    public static var metricRose:   Color { isClassic ? Color(light: "#CB3A2F", dark: "#E5483B") : Color(light: "#C84E1E", dark: "#E0662F") }
-
+    private static let _metricCyanClassic = Color(light: "#2E92B4", dark: "#3FA9C9")
+    private static let _metricCyanDefault = Color(light: "#2E92B4", dark: "#3FA9C9")
+    public static var metricCyan:   Color { isClassic ? _metricCyanClassic : _metricCyanDefault }
+    private static let _metricPurpleClassic = Color(light: "#6A4FC0", dark: "#8E6FD6")
+    private static let _metricPurpleDefault = Color(light: "#3A80D6", dark: "#4A90E2")
+    public static var metricPurple: Color { isClassic ? _metricPurpleClassic : _metricPurpleDefault }
+    private static let _metricAmberClassic = Color(light: "#CFA528", dark: "#F2C53D")
+    private static let _metricAmberDefault = Color(light: "#C2792E", dark: "#D98A3D")
+    public static var metricAmber:  Color { isClassic ? _metricAmberClassic : _metricAmberDefault }
+    private static let _metricRoseClassic = Color(light: "#CB3A2F", dark: "#E5483B")
+    private static let _metricRoseDefault = Color(light: "#C84E1E", dark: "#E0662F")
+    public static var metricRose:   Color { isClassic ? _metricRoseClassic : _metricRoseDefault }
     // MARK: - Titanium & Gold domain "colour worlds" (NEW)
     //
     // Each daily score owns a two-stop accent gradient (deep → bright) plus a glow.
@@ -226,32 +245,64 @@ public enum StrandPalette {
     // full red→green / blue / green→red in Classic regardless of these.
 
     /// Charge (recovery) — gold world / Classic green.
-    public static var chargeColor: Color  { isClassic ? Color(light: "#2E9E4F", dark: "#46B45A") : Color(light: "#0F9D62", dark: "#03E095") }
-    public static var chargeDeep: Color    { isClassic ? Color(light: "#207A3C", dark: "#2E9E4F") : Color(light: "#0B7A4A", dark: "#0B9D62") }
-    public static var chargeBright: Color  { isClassic ? Color(light: "#5FBE6E", dark: "#86D98E") : Color(light: "#5FD89A", dark: "#6BF0B4") }
-    public static var chargeGlow: Color    { isClassic ? Color(light: "#2E9E4F", dark: "#46B45A") : Color(light: "#0F9D62", dark: "#03E095") }
+    private static let _chargeColorClassic = Color(light: "#2E9E4F", dark: "#46B45A")
+    private static let _chargeColorDefault = Color(light: "#0F9D62", dark: "#03E095")
+    public static var chargeColor: Color  { isClassic ? _chargeColorClassic : _chargeColorDefault }
+    private static let _chargeDeepClassic = Color(light: "#207A3C", dark: "#2E9E4F")
+    private static let _chargeDeepDefault = Color(light: "#0B7A4A", dark: "#0B9D62")
+    public static var chargeDeep: Color    { isClassic ? _chargeDeepClassic : _chargeDeepDefault }
+    private static let _chargeBrightClassic = Color(light: "#5FBE6E", dark: "#86D98E")
+    private static let _chargeBrightDefault = Color(light: "#5FD89A", dark: "#6BF0B4")
+    public static var chargeBright: Color  { isClassic ? _chargeBrightClassic : _chargeBrightDefault }
+    private static let _chargeGlowClassic = Color(light: "#2E9E4F", dark: "#46B45A")
+    private static let _chargeGlowDefault = Color(light: "#0F9D62", dark: "#03E095")
+    public static var chargeGlow: Color    { isClassic ? _chargeGlowClassic : _chargeGlowDefault }
     /// Diagonal accent pair for the Charge card wash + gauge stroke (deep → bright).
     public static var chargeGradient: Gradient { Gradient(colors: [chargeDeep, chargeBright]) }
 
     /// Effort (strain) — amber world / Classic blue.
-    public static var effortColor: Color   { isClassic ? Color(light: "#3A74C4", dark: "#4A90E2") : Color(light: "#2A78C8", dark: "#4090E0") }
-    public static var effortDeep: Color    { isClassic ? Color(light: "#284F9C", dark: "#2F6FCB") : Color(light: "#1E5B96", dark: "#2A6FB0") }
-    public static var effortBright: Color  { isClassic ? Color(light: "#5E92D6", dark: "#7FB2E8") : Color(light: "#5AA0E0", dark: "#74B6F0") }
-    public static var effortGlow: Color    { isClassic ? Color(light: "#3A74C4", dark: "#4A90E2") : Color(light: "#2A78C8", dark: "#4090E0") }
+    private static let _effortColorClassic = Color(light: "#3A74C4", dark: "#4A90E2")
+    private static let _effortColorDefault = Color(light: "#2A78C8", dark: "#4090E0")
+    public static var effortColor: Color   { isClassic ? _effortColorClassic : _effortColorDefault }
+    private static let _effortDeepClassic = Color(light: "#284F9C", dark: "#2F6FCB")
+    private static let _effortDeepDefault = Color(light: "#1E5B96", dark: "#2A6FB0")
+    public static var effortDeep: Color    { isClassic ? _effortDeepClassic : _effortDeepDefault }
+    private static let _effortBrightClassic = Color(light: "#5E92D6", dark: "#7FB2E8")
+    private static let _effortBrightDefault = Color(light: "#5AA0E0", dark: "#74B6F0")
+    public static var effortBright: Color  { isClassic ? _effortBrightClassic : _effortBrightDefault }
+    private static let _effortGlowClassic = Color(light: "#3A74C4", dark: "#4A90E2")
+    private static let _effortGlowDefault = Color(light: "#2A78C8", dark: "#4090E0")
+    public static var effortGlow: Color    { isClassic ? _effortGlowClassic : _effortGlowDefault }
     public static var effortGradient: Gradient { Gradient(colors: [effortDeep, effortBright]) }
 
     /// Rest (sleep) — blue world / Classic indigo.
-    public static var restColor: Color     { isClassic ? Color(light: "#3A80D6", dark: "#6FA8E8") : Color(light: "#5E7896", dark: "#83A0B8") }
-    public static var restDeep: Color      { isClassic ? Color(light: "#203E73", dark: "#2A4C8F") : Color(light: "#234F9E", dark: "#2F6FCB") }
-    public static var restBright: Color    { isClassic ? Color(light: "#6A4FC0", dark: "#8E6FD6") : Color(light: "#5790DA", dark: "#6FA8E8") }
-    public static var restGlow: Color      { isClassic ? Color(light: "#3A80D6", dark: "#6FA8E8") : Color(light: "#3A80D6", dark: "#4A90E2") }
+    private static let _restColorClassic = Color(light: "#3A80D6", dark: "#6FA8E8")
+    private static let _restColorDefault = Color(light: "#5E7896", dark: "#83A0B8")
+    public static var restColor: Color     { isClassic ? _restColorClassic : _restColorDefault }
+    private static let _restDeepClassic = Color(light: "#203E73", dark: "#2A4C8F")
+    private static let _restDeepDefault = Color(light: "#234F9E", dark: "#2F6FCB")
+    public static var restDeep: Color      { isClassic ? _restDeepClassic : _restDeepDefault }
+    private static let _restBrightClassic = Color(light: "#6A4FC0", dark: "#8E6FD6")
+    private static let _restBrightDefault = Color(light: "#5790DA", dark: "#6FA8E8")
+    public static var restBright: Color    { isClassic ? _restBrightClassic : _restBrightDefault }
+    private static let _restGlowClassic = Color(light: "#3A80D6", dark: "#6FA8E8")
+    private static let _restGlowDefault = Color(light: "#3A80D6", dark: "#4A90E2")
+    public static var restGlow: Color      { isClassic ? _restGlowClassic : _restGlowDefault }
     public static var restGradient: Gradient { Gradient(colors: [restDeep, restBright]) }
 
     /// Stress — blue→gold→orange world / Classic green→amber→red.
-    public static var stressColor: Color   { isClassic ? Color(light: "#CFA528", dark: "#F2C53D") : Color(light: "#C7891A", dark: "#F0A020") }
-    public static var stressDeep: Color    { isClassic ? Color(light: "#2E9E4F", dark: "#46B45A") : Color(light: "#3A80D6", dark: "#4A90E2") }
-    public static var stressBright: Color  { isClassic ? Color(light: "#CB3A2F", dark: "#E5483B") : Color(light: "#C84E1E", dark: "#E0662F") }
-    public static var stressGlow: Color    { isClassic ? Color(light: "#CFA528", dark: "#F2C53D") : Color(light: "#C7891A", dark: "#F0A020") }
+    private static let _stressColorClassic = Color(light: "#CFA528", dark: "#F2C53D")
+    private static let _stressColorDefault = Color(light: "#C7891A", dark: "#F0A020")
+    public static var stressColor: Color   { isClassic ? _stressColorClassic : _stressColorDefault }
+    private static let _stressDeepClassic = Color(light: "#2E9E4F", dark: "#46B45A")
+    private static let _stressDeepDefault = Color(light: "#3A80D6", dark: "#4A90E2")
+    public static var stressDeep: Color    { isClassic ? _stressDeepClassic : _stressDeepDefault }
+    private static let _stressBrightClassic = Color(light: "#CB3A2F", dark: "#E5483B")
+    private static let _stressBrightDefault = Color(light: "#C84E1E", dark: "#E0662F")
+    public static var stressBright: Color  { isClassic ? _stressBrightClassic : _stressBrightDefault }
+    private static let _stressGlowClassic = Color(light: "#CFA528", dark: "#F2C53D")
+    private static let _stressGlowDefault = Color(light: "#C7891A", dark: "#F0A020")
+    public static var stressGlow: Color    { isClassic ? _stressGlowClassic : _stressGlowDefault }
     /// 3-stop gauge ramp: calm → balanced → high.
     public static var stressGradient: Gradient { Gradient(colors: [stressDeep, stressColor, stressBright]) }
 

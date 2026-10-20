@@ -28,7 +28,8 @@ final class LiveLogProjectionTests: XCTestCase {
         let beforeAppend = live.visibleLog
         live.append(log: "line \(LiveState.maxLogLines + 2)")
 
-        XCTAssertEqual(live.log.count, LiveState.maxLogLines)
+        // The source buffer trims in batches: it may run up to `logTrimSlack` lines over the cap.
+        XCTAssertLessThanOrEqual(live.log.count, LiveState.maxLogLines + LiveState.logTrimSlack)
         XCTAssertEqual(beforeAppend.last?.id, UInt64(LiveState.maxLogLines + 1))
         XCTAssertEqual(live.visibleLog.last?.id, UInt64(LiveState.maxLogLines + 2))
         XCTAssertGreaterThan(live.visibleLog.first!.id, beforeAppend.first!.id)
@@ -80,5 +81,12 @@ final class LiveLogProjectionTests: XCTestCase {
         for number in 1...count {
             live.append(log: "line \(number)")
         }
+    }
+
+    func testSourceBufferTrimsBackToTheCapOncePastTheSlack() {
+        let live = LiveState()
+        append(LiveState.maxLogLines + LiveState.logTrimSlack + 1, to: live)
+        XCTAssertEqual(live.log.count, LiveState.maxLogLines)
+        XCTAssertEqual(live.log.last, "line \(LiveState.maxLogLines + LiveState.logTrimSlack + 1)")
     }
 }

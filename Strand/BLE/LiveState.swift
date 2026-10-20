@@ -265,7 +265,9 @@ public final class LiveState: ObservableObject {
         return String(watts)
     }
     /// Rolling log of human-readable lines for the on-device verification checklist.
-    @Published public var log: [String] = []
+    /// Not @Published: `visibleLog` changes on every append, so its observers already re-render; a
+    /// second publish of the 5,000-line array per line was pure overhead. (2026-10-21)
+    public var log: [String] = []
     /// A stable identity for one line in the bounded log projection rendered by the Live screen.
     public struct VisibleLogLine: Identifiable, Equatable {
         public let id: UInt64
@@ -475,6 +477,7 @@ public final class LiveState: ObservableObject {
     /// unbounded. Drives the Live log card AND the shareable `exportableLogText()`.
     static let maxLogLines = 5_000
     static let maxVisibleLogLines = 200
+    static let logTrimSlack = 500
 
     public func append(log line: String, domain: TestDomain? = nil) {
         // Tag inert when nil (today's behaviour, byte-identical). When tagged, prefix a compact,
@@ -483,7 +486,9 @@ public final class LiveState: ObservableObject {
         let tagged = domain.map { "[\($0.id)] " + line } ?? line
         let redacted = Self.redactPii(tagged)
         log.append(redacted)
-        if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
+        // Trim in batches: shifting the full 5,000-line array on every line once it was full cost
+        // O(n) per log line. The buffer now runs up to `logTrimSlack` lines over the cap between trims.
+        if log.count > Self.maxLogLines + Self.logTrimSlack { log.removeFirst(log.count - Self.maxLogLines) }
         let visibleLine = VisibleLogLine(id: nextVisibleLogID, text: redacted)
         nextVisibleLogID += 1
         visibleLog.append(visibleLine)
@@ -571,18 +576,27 @@ public final class LiveState: ObservableObject {
     /// are exactly the GATT diagnostics a shared log needs to be useful (#421). Thanks @ujix (#447) for
     /// catching the peripheral-UUID leak; this is a targeted form so we don't redact the service UUIDs.
     nonisolated static func redactPii(_ s: String) -> String {
+        // Compiled once (below): `replacingOccurrences(options: .regularExpression)` recompiled all three
+        // patterns on every log line.
         var out = s
-        out = out.replacingOccurrences(
-            of: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})",
-            with: "$1:••:••:••:••:$2", options: .regularExpression)
-        out = out.replacingOccurrences(
-            of: "WHOOP (\\d[0-9A-Za-z]{5,})", with: "WHOOP <serial>", options: .regularExpression)
-        // Mask a CoreBluetooth peripheral UUID, but NOT a standard-BLE / WHOOP-vendor service UUID.
-        out = out.replacingOccurrences(
-            of: "(?![0-9A-Fa-f]{8}-(?:0000-1000-8000-00805f9b34fb|8d6d-82b8-614a-1c8cb0f8dcc6))[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
-            with: "<device>", options: [.regularExpression, .caseInsensitive])
+        for (regex, template) in redactRules {
+            out = regex.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out),
+                                                 withTemplate: template)
+        }
         return out
     }
+
+    nonisolated private static let redactRules: [(NSRegularExpression, String)] = [
+        (try! NSRegularExpression(
+            pattern: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})"),
+         "$1:••:••:••:••:$2"),
+        (try! NSRegularExpression(pattern: "WHOOP (\\d[0-9A-Za-z]{5,})"), "WHOOP <serial>"),
+        // Mask a CoreBluetooth peripheral UUID, but NOT a standard-BLE / WHOOP-vendor service UUID.
+        (try! NSRegularExpression(
+            pattern: "(?![0-9A-Fa-f]{8}-(?:0000-1000-8000-00805f9b34fb|8d6d-82b8-614a-1c8cb0f8dcc6))[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
+            options: [.caseInsensitive]),
+         "<device>"),
+    ]
 
     /// The full, shareable strap log for a bug report (issue #17): a header carrying the app version,
     /// OS, and — on iOS — the environment diagnostics that actually cause issues, followed by the live

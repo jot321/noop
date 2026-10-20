@@ -170,6 +170,14 @@ final class LiquidPower: ObservableObject {
 
     @Published private(set) var lowPower: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
 
+    /// Continuous liquid motion: sloshing vessels and tubes, the twinkling sky, the glinting HR thread.
+    /// OFF by default since 2026-10-21. At rest it kept roughly 100-260 Canvas redraws a second running
+    /// on Today, under sheets and on other tabs, plus 60 Hz CoreMotion: most of the UI's lag. With it
+    /// off every liquid view renders one static frame (redrawn only when its value changes), which looks
+    /// the same at rest. `defaults write <bundle> liquid.motionEnabled -bool YES` brings it back.
+    static let motionEnabledKey = "liquid.motionEnabled"
+    var motionEnabled: Bool { UserDefaults.standard.bool(forKey: Self.motionEnabledKey) }
+
     private init() {
         // The power-state notification can post on a background thread; hop to main so the @Published
         // write (observed by main-actor SwiftUI views) stays on the main actor.

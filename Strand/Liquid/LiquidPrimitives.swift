@@ -273,7 +273,7 @@ struct LiquidVessel: View {
     }
 
     var body: some View {
-        if animated && !reduceMotion && !power.lowPower { gauge } else { staticGauge }
+        if animated && power.motionEnabled && !reduceMotion && !power.lowPower { gauge } else { staticGauge }
     }
 
     private var gauge: some View {
@@ -324,7 +324,7 @@ struct LiquidTube: View {
     @State private var idle = false
 
     var body: some View {
-        if animated && !reduceMotion && !power.lowPower { liveTube } else { staticTube }
+        if animated && power.motionEnabled && !reduceMotion && !power.lowPower { liveTube } else { staticTube }
     }
 
     private var liveTube: some View {
@@ -365,7 +365,7 @@ struct LiquidThread: View {
     @State private var cache = LiquidThreadPathCache()
 
     var body: some View {
-        if animated && !reduceMotion && !power.lowPower { liveThread } else { staticThread }
+        if animated && power.motionEnabled && !reduceMotion && !power.lowPower { liveThread } else { staticThread }
     }
 
     private var liveThread: some View {

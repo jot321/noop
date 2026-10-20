@@ -34,6 +34,12 @@ struct LiquidTodayView: View {
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
     @State private var workouts: [WorkoutRow] = [] // newest-first
+    // History-wide series cached by `loadHistory()`, which runs only when the repository refreshes. A day
+    // swipe used to re-read and re-sort them, plus 4,000 days of workouts, on the main actor each time.
+    @State private var restByDay: [String: Double] = [:]
+    @State private var restLast: (day: String, value: Double)?
+    @State private var stepsByDay: [String: Double] = [:]
+    @State private var stepsLast: Double?
 
     // sheets / expanders
     @State private var guideSection: ScoreSection?
@@ -162,8 +168,7 @@ struct LiquidTodayView: View {
         case 0: return "Today"
         case 1: return "Yesterday"
         default:
-            let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "EEEE"
-            return f.string(from: selectedLogicalDay)
+            return Self.weekdayFormatter.string(from: selectedLogicalDay)
         }
     }
     /// Two-way binding for the graphical calendar: reads the shown day, writes back an offset.
@@ -209,6 +214,16 @@ struct LiquidTodayView: View {
                                       to: cal.startOfDay(for: anchorLogicalDay)).day ?? 0
         return max(0, days)
     }
+    // Formatters are built once: creating them inside body-time properties cost a formatter per render.
+    private static let weekdayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "EEEE"; return f
+    }()
+    private static let dateLineFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "EEEE, d MMMM"; return f
+    }()
+    private static let decimalFormatter: NumberFormatter = {
+        let f = NumberFormatter(); f.numberStyle = .decimal; return f
+    }()
     private static let dayKeyParser: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -274,7 +289,7 @@ struct LiquidTodayView: View {
                 // Reduce-motion (and low-power) users get the same sky posed still — no twinkle/breath.
                 // Also static until the first data load settles, so launch isn't fighting a live sky too.
                 Group {
-                    if reduceMotion || power.lowPower || !dataLoaded { LiquidSkyStatic(hour: liveHour) }
+                    if reduceMotion || power.lowPower || !dataLoaded || !power.motionEnabled { LiquidSkyStatic(hour: liveHour) }
                     else { LiquidSky(hour: liveHour) }
                 }
                 .frame(maxWidth: .infinity)
@@ -290,6 +305,7 @@ struct LiquidTodayView: View {
         // A light tick when the day changes (swipe or calendar pick) — the WHOOP-style day nav should
         // feel physical ("every tiny little thing").
         .liquidSelectionHaptic(trigger: selectedDayOffset)
+        .task(id: repo.refreshSeq) { await loadHistory() }
         .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)") { await load() }
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
@@ -865,38 +881,30 @@ struct LiquidTodayView: View {
             ? Int(Date().timeIntervalSince1970)
             : Int((cal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart).timeIntervalSince1970)
 
+        // Day-scoped only: the selected day's HR. History-wide series come from `loadHistory()`.
+        let newHrValues = await repo.hrBuckets(from: from, to: to, bucketSeconds: 300).map { $0.bpm }
+        hrValues = newHrValues
+        applyDaySeries()
+        // First load done — bring the hero gauges + sky to life now the launch churn has settled.
+        if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
+    }
+
+    /// History-wide inputs: Rest and Steps series (kept per day), Fitness Age, Vitality, Stress and
+    /// workouts. Runs when the repository refreshes, not on a day swipe.
+    private func loadHistory() async {
         async let restA = repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
         async let stressA = repo.series(key: "stress", source: "my-whoop")
         async let fitA = repo.exploreSeries(key: "fitness_age", source: "my-whoop")
         async let vitA = repo.exploreSeries(key: "vitality", source: "my-whoop")
         async let stepsA = repo.exploreSeries(key: "steps_est", source: "my-whoop")
-        async let hrA = repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
         async let wkA = repo.workoutRows()
 
-        // Await EVERYTHING into locals first, then commit in ONE synchronous block at the end: an
-        // @State write landing between awaits schedules its own re-evaluation of this (large) body,
-        // so the old interleaved writes cost up to ~7 full passes per refresh — visible as a hitch
-        // when an auto-refresh landed mid-scroll. Batched, SwiftUI coalesces the commit into one pass.
+        // Await everything into locals first, then commit in one synchronous block, so SwiftUI coalesces
+        // the writes into one pass instead of one per await.
         let restSeries = await restA
-        let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-        // Selected day's Rest; tail fallback only at offset 0 (a past day with no row shows nothing) AND
-        // only when the tail night is still fresh. #977: a live 5.0 whose sleep never scores (no overnight
-        // gravity ⇒ no sleep_performance point ever written) used to pin Rest to the weeks-old series tail
-        // forever while Charge advanced; freshness-gate the tail-fallback so a stale tail falls through to
-        // the Rest hero's No-Data/calibrating state (same empty treatment Effort uses) instead of freezing.
-        let newRest = TodayView.freshRestScore(
-            todayValue: restByDay[selectedDayKey], lastDay: restSeries.last?.day,
-            lastValue: restSeries.last?.value, isTodaySelected: selectedDayOffset == 0,
-            todayKey: selectedDayKey)
+        let stepsSeries = await stepsA
         let newFitnessAge = (await fitA).last?.value   // history-wide latest banked (not day-scoped)
         let newVitality = (await vitA).last?.value
-        // Steps is a DAILY metric, so key it to the SELECTED day (like restScore above), not the history-wide
-        // latest. Without this, swiping to a past day with no strap step count showed today's estimate (the
-        // `.last` value) instead of that day's. Mirrors the classic Today's stepsEstByDay[selectedDayKey].
-        let stepsSeries = await stepsA
-        let stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-        let newSteps = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
-        let newHrValues = (await hrA).map { $0.bpm }
         let newWorkouts = await wkA
         // StressModel loops the full history to build its baseline — run it OFF the main actor so a big
         // history doesn't stutter the UI. Snapshot the inputs (value types) into the detached task.
@@ -906,15 +914,25 @@ struct LiquidTodayView: View {
             StressModel(days: daysSnapshot, stored: storedStress)?.score
         }.value
 
-        restScore = newRest
+        restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        restLast = restSeries.last.map { (day: $0.day, value: $0.value) }
+        stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        stepsLast = stepsSeries.last?.value
         stress = newStress
         fitnessAge = newFitnessAge
         vitality = newVitality
-        stepsEst = newSteps
-        hrValues = newHrValues
         workouts = newWorkouts
-        // First load done — bring the hero gauges + sky to life now the launch churn has settled.
-        if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
+        applyDaySeries()
+    }
+
+    /// The selected day's Rest and Steps from the cached series. Rest's tail fallback applies only at
+    /// offset 0 and only while the tail night is fresh (#977); Steps is keyed to the selected day.
+    private func applyDaySeries() {
+        restScore = TodayView.freshRestScore(
+            todayValue: restByDay[selectedDayKey], lastDay: restLast?.day,
+            lastValue: restLast?.value, isTodaySelected: selectedDayOffset == 0,
+            todayKey: selectedDayKey)
+        stepsEst = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsLast : nil)
     }
 
     // MARK: - Derived (sync, off repo.today / repo.days)
@@ -980,9 +998,7 @@ struct LiquidTodayView: View {
 
     private var stepsText: String {
         guard let s = stepCount else { return "–" }
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        return f.string(from: NSNumber(value: Int(s))) ?? "\(Int(s))"
+        return Self.decimalFormatter.string(from: NSNumber(value: Int(s))) ?? "\(Int(s))"
     }
 
     // The user's Effort display scale (#268), 0–100 by default or the WHOOP 0–21 axis if chosen — the SAME
@@ -1007,10 +1023,7 @@ struct LiquidTodayView: View {
     }
 
     private var dateLine: String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "EEEE, d MMMM"
-        return f.string(from: selectedLogicalDay)
+        Self.dateLineFormatter.string(from: selectedLogicalDay)
     }
 
     /// Provenance caption for the recovery-vitals card, keyed on the row a vital actually came from — NOT a

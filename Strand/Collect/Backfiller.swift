@@ -101,6 +101,11 @@ final class Backfiller {
     /// in the FUTURE (a corrupt strap RTC). Distinct from #547's per-record drop tally: this fires on the
     /// chunk metadata's own clock, the earliest visible tell that the strap's RTC is bogus. Reset in begin().
     private var loggedFutureRtc = false
+    /// The rejected-frame hex sample is logged for the first rejecting chunk of a session only. The raw
+    /// bytes are archived in full either way; dumping 8 full frames per chunk flooded the strap log
+    /// (thousands of lines an hour during a long backfill) and re-rendered every LiveState observer per
+    /// line. Reset in begin(). (2026-10-21)
+    private var loggedRejectSample = false
 
     /// #547: running count of historical records DROPPED this session for an implausible own-timestamp
     /// (a bad-clock strap — far-past / bogus-2027 / future-dated). Tallied across chunks and surfaced once
@@ -195,6 +200,7 @@ final class Backfiller {
         sessionNightKeys.removeAll(keepingCapacity: true)
         loggedNoCursor = false
         loggedFutureRtc = false
+        loggedRejectSample = false
         sessionDroppedImplausible = 0
         loggedLayoutVersions.removeAll(keepingCapacity: true)
         spo2Dumped = 0
@@ -450,9 +456,12 @@ final class Backfiller {
                 // prefix — v25/v26 records run ~84 B and the truncated tail is exactly where the
                 // unmapped motion/HR fields sit), and sample a few more so one log carries enough
                 // records to triangulate offsets. These only ever fire for unmapped firmware.
-                for (i, f) in rejected.prefix(8).enumerated() {
-                    let hex = f.map { String(format: "%02x", $0) }.joined()
-                    log?("Backfill: rejected frame[\(i)] \(f.count)B: \(hex)")
+                if !loggedRejectSample {
+                    loggedRejectSample = true
+                    for (i, f) in rejected.prefix(8).enumerated() {
+                        let hex = f.map { String(format: "%02x", $0) }.joined()
+                        log?("Backfill: rejected frame[\(i)] \(f.count)B: \(hex)")
+                    }
                 }
             }
             // Commit the decoded rows FIRST (durable). Doing this before the reject archive means a
