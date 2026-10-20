@@ -163,48 +163,13 @@ private struct _AnimatableNumber: View, Animatable {
 
 // MARK: - Staggered appear
 //
-// Fade-in + 8pt rise, sequenced by `index`. Runs ONCE per element (guarded by `hasAppeared`),
-// so re-renders / scroll recycling don't re-trigger it. Reduce Motion → visible instantly,
-// no offset.
-
-private struct StaggeredAppear: ViewModifier {
-    let index: Int
-    let isVisible: Bool
-
-    @State private var hasAppeared = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func body(content: Content) -> some View {
-        // `shown` is true once we've appeared (or immediately under Reduce Motion / when the
-        // element is asked to appear without animation).
-        let shown = hasAppeared || reduceMotion
-        content
-            .opacity(isVisible ? (shown ? 1 : 0) : 1)
-            .offset(y: (isVisible && !shown) ? NoopMotion.riseOffset : 0)
-            .onAppear {
-                guard isVisible, !hasAppeared else { return }
-                if reduceMotion {
-                    hasAppeared = true                  // no animation, no delay
-                } else {
-                    let delay = Double(max(0, index)) * NoopMotion.stagger
-                    withAnimation(NoopMotion.card.delay(delay)) {
-                        hasAppeared = true
-                    }
-                }
-            }
-    }
-}
+// Retired in the minimal redesign (2026-10-21): content appears at once. The modifier stays as a
+// pass-through so the 70-odd call sites need no edit.
 
 public extension View {
-    /// Fade-in + 8pt rise on first appearance, delayed by `index * 0.04s` for a sequenced
-    /// list/grid reveal. Runs ONCE per element. Honours Reduce Motion (appears instantly,
-    /// no offset).
-    ///
-    /// - Parameters:
-    ///   - index: position in the sequence (0 = first / no delay).
-    ///   - isVisible: set `false` to opt an element out of the animation (it stays fully shown).
+    /// Pass-through (the entrance animation is retired); kept so existing call sites compile.
     func staggeredAppear(index: Int, isVisible: Bool = true) -> some View {
-        modifier(StaggeredAppear(index: index, isVisible: isVisible))
+        self
     }
 }
 
