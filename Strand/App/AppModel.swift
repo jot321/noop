@@ -1510,8 +1510,15 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
     private func applyIllnessSignal(_ days: [DailyMetric], alcohol: Bool,
                                     hardOrLateWorkout: Bool, alreadyUnwell: Bool) {
         let previous = healthAlert
-        let recent = Array(days.suffix(2))
-        let base = Array(days.suffix(31).dropLast(3))    // ~28 days ending 3 days ago
+        // Calendar windows ending today: the last 2 days, and the 28 days ending 3 days ago. Counting rows
+        // (suffix(2) / suffix(31)) reached back months after a gap, comparing this week with July.
+        let todayKey = Repository.logicalDayKey(Date())
+        let recentStart = WeeklyDigestEngine.addDays(todayKey, -1)
+        let baseStart = WeeklyDigestEngine.addDays(todayKey, -30)
+        let baseEnd = WeeklyDigestEngine.addDays(todayKey, -3)
+        let sortedDays = days.sorted { $0.day < $1.day }
+        let recent = sortedDays.filter { $0.day >= recentStart && $0.day <= todayKey }
+        let base = sortedDays.filter { $0.day >= baseStart && $0.day <= baseEnd }
         func mean(_ vals: [Double]) -> Double? { vals.isEmpty ? nil : vals.reduce(0, +) / Double(vals.count) }
         func rm(_ kp: (DailyMetric) -> Double?) -> Double? { mean(recent.compactMap(kp)) }
 

@@ -37,6 +37,8 @@ struct LiquidTodayView: View {
     /// Today's logical day key; a change (04:00 rollover seen on foreground or at midnight) reloads.
     @State private var logicalToday = Repository.logicalDayKey(Date())
     @State private var cachedChargeCalibration: (n: Int, seed: Int)?
+    /// The shown night has HRV but no Charge because the baseline went stale over a long gap.
+    @State private var relearning = false
     @Environment(\.scenePhase) private var scenePhase
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
@@ -478,25 +480,10 @@ struct LiquidTodayView: View {
     /// and breathing baselines from repo.days (the inputs the score used), which is too much for body.
     private var chargeDetail: some View {
         let row = displayDay
-        var drivers: [ChargeDriver] = []
-        // Fold only the nights before this one, with the engine's recalibration epochs, so the drivers
-        // explain the score the ring shows (folding every day, this night included, explained another).
-        let prior = repo.days.filter { $0.day < (row?.day ?? selectedDayKey) }.sorted { $0.day < $1.day }
-        let keys = prior.map(\.day)
-        let epoch = Baselines.recoveryBaselineEpoch()
-        let hrvBase = Baselines.foldHistory(prior.map(\.avgHrv), dayKeys: keys, cfg: Baselines.hrvCfg)
-        if let row, let hrv = row.avgHrv, let rhr = row.restingHr, hrvBase.usable {
-            let rhrBase = Baselines.foldHistory(prior.map { $0.restingHr.map(Double.init) }, dayKeys: keys,
-                                                cfg: Baselines.restingHRCfg, baselineEpoch: epoch)
-            let respBase = Baselines.foldHistory(prior.map(\.respRateBpm), dayKeys: keys,
-                                                 cfg: Baselines.respCfg, baselineEpoch: epoch)
-            drivers = RecoveryScorer.chargeDrivers(
-                hrv: hrv, rhr: Double(rhr), resp: row.respRateBpm,
-                hrvBaseline: hrvBase,
-                rhrBaseline: rhrBase.usable ? rhrBase : nil,
-                respBaseline: respBase.usable ? respBase : nil,
-                sleepPerf: restScore.map { $0 / 100.0 }, skinTempDev: row.skinTempDevC)
-        }
+        // The engine's calendar fold over the nights before this one, so the drivers explain the
+        // score the ring shows.
+        let hrvBase = ChargeBaselines.before(row?.day ?? selectedDayKey, days: repo.days).hrv
+        let drivers = ChargeBaselines.drivers(for: row, days: repo.days, restScore: restScore)
         return ScoreDetailView(
             title: String(localized: "Charge"), score: row?.recovery, tint: StrandPalette.chargeColor,
             verdict: synthLine, note: chargeCalibrationNote, drivers: drivers,
@@ -932,6 +919,7 @@ struct LiquidTodayView: View {
         cachedDisplayDay = day
         cachedReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day)
         cachedChargeCalibration = resolveChargeCalibration()
+        relearning = ChargeBaselines.isRelearning(day, days: repo.days)
         // Prior-day vitals carry, resolved ONCE here (never in body). Bound to today's own key so it can't
         // echo today's still-forming row; only on today (a past day's own row is the whole story).
         let tkey = cachedDisplayDay?.day ?? selectedDayKey
@@ -1040,6 +1028,10 @@ struct LiquidTodayView: View {
 
     private var synthLine: String {
         // No score of today's own: a readiness sentence from older days would read as today's verdict.
+        // Back after a long gap: the night has HRV but Charge is re-learning (cached in load()).
+        if relearning {
+            return String(localized: "Back after a long gap. Charge returns after another night with the strap on.")
+        }
         // Effort alone (it starts at 0 each morning) isn't enough to judge readiness by.
         if displayDay?.recovery == nil, restScore == nil {
             return String(localized: "No scores for today yet. They fill in after a night's sleep.")

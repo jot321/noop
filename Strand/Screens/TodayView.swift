@@ -642,29 +642,14 @@ struct TodayView: View {
     /// already resolved into `repo.days`/`displayDay`. Empty for a calibrating / cold-start night (no usable
     /// HRV baseline or no value), so the sheet gates through to the calibration countdown instead.
     private var chargeDrivers: [ChargeDriver] {
-        guard let row = chargeBreakdownRow,
-              let hrv = row.avgHrv, let rhr = row.restingHr else { return [] }
-        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
-        guard hrvBase.usable else { return [] }
-        let rhrBase = Baselines.foldHistory(repo.days.map { $0.restingHr.map(Double.init) },
-                                            cfg: Baselines.restingHRCfg)
-        let respBase = Baselines.foldHistory(repo.days.map(\.respRateBpm), cfg: Baselines.respCfg)
-        // Rest-quality term = the Rest composite ÷100, matching AnalyticsEngine's `sleepPerf`. `restScore`
-        // is the same merged sleep_performance value the Rest ring reads, so the term stays consistent.
-        let sleepPerf = restScore.map { $0 / 100.0 }
-        return RecoveryScorer.chargeDrivers(
-            hrv: hrv, rhr: Double(rhr), resp: row.respRateBpm,
-            hrvBaseline: hrvBase,
-            rhrBaseline: rhrBase.usable ? rhrBase : nil,
-            respBaseline: respBase.usable ? respBase : nil,
-            sleepPerf: sleepPerf, skinTempDev: row.skinTempDevC)
+        ChargeBaselines.drivers(for: chargeBreakdownRow, days: repo.days, restScore: restScore)
     }
 
     /// The Charge confidence tier for the displayed row, SURFACED (never recomputed) from the existing
     /// `ScoreConfidence.charge` against the same folded HRV baseline the drivers scored with, so the dot +
     /// tier tag in the sheet header agree with the breakdown.
     private var chargeBreakdownConfidence: ScoreConfidence {
-        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+        let hrvBase = ChargeBaselines.before(chargeBreakdownRow?.day ?? selectedDayKey, days: repo.days).hrv
         return ScoreConfidence.charge(recovery: chargeBreakdownRow?.recovery, hrvBaseline: hrvBase)
     }
 

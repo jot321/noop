@@ -490,20 +490,7 @@ struct CoupledView: View {
     /// scoring against the folded personal baselines). Empty for a calibrating / cold-start night, which
     /// gates the sheet through to the countdown instead.
     private var chargeDrivers: [ChargeDriver] {
-        guard let row = breakdownRow, let hrv = row.avgHrv, let rhr = row.restingHr else { return [] }
-        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
-        guard hrvBase.usable else { return [] }
-        let rhrBase = Baselines.foldHistory(repo.days.map { $0.restingHr.map(Double.init) },
-                                            cfg: Baselines.restingHRCfg)
-        let respBase = Baselines.foldHistory(repo.days.map(\.respRateBpm), cfg: Baselines.respCfg)
-        // Rest-quality term = the same sleep performance the sleep row shows, ÷100 (AnalyticsEngine's form).
-        let sleepPerf = sleepPerformance.map { $0 / 100.0 }
-        return RecoveryScorer.chargeDrivers(
-            hrv: hrv, rhr: Double(rhr), resp: row.respRateBpm,
-            hrvBaseline: hrvBase,
-            rhrBaseline: rhrBase.usable ? rhrBase : nil,
-            respBaseline: respBase.usable ? respBase : nil,
-            sleepPerf: sleepPerf, skinTempDev: row.skinTempDevC)
+        ChargeBaselines.drivers(for: breakdownRow, days: repo.days, restScore: sleepPerformance)
     }
 
     @ViewBuilder
@@ -529,7 +516,7 @@ struct CoupledView: View {
                             }
                         }
                     } else {
-                        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+                        let hrvBase = ChargeBaselines.before(breakdownRow?.day ?? "", days: repo.days).hrv
                         NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
                             ChargeBreakdownSection(
                                 drivers: drivers,
