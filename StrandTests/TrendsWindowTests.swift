@@ -33,4 +33,28 @@ final class TrendsWindowTests: XCTestCase {
         let days = [daily("2026-07-14"), daily("2026-10-21")]
         XCTAssertFalse(TrendsView.yearStripRows(days, range: .all, today: "2026-10-21").allHistory)
     }
+
+    // MARK: Small-multiple change chip
+
+    func testChangeChipSplitsAtTheMidpointDate() {
+        // Twelve July readings at 50, then two in October at 80, all inside a 6-month window.
+        // By count the "recent" half held five July readings too (+8.6); by date it is October (+30).
+        let july = (17...28).map { String(format: "2026-07-%02d", $0) }
+        let days = july + ["2026-10-20", "2026-10-21"]
+        let values = Array(repeating: 50.0, count: july.count) + [80, 80]
+        let change = TrendsView.periodChange(days: days, values: values)
+        XCTAssertEqual(change ?? 0, 30, accuracy: 1e-9)
+    }
+
+    func testChangeChipNeedsTwoReadingsEachSide() {
+        // One October reading can't stand for a "recent half".
+        let days = (17...28).map { String(format: "2026-07-%02d", $0) } + ["2026-10-21"]
+        let values = Array(repeating: 50.0, count: 12) + [80]
+        XCTAssertNil(TrendsView.periodChange(days: days, values: values))
+    }
+
+    func testChangeChipNeedsFourReadings() {
+        XCTAssertNil(TrendsView.periodChange(days: ["2026-10-19", "2026-10-20", "2026-10-21"],
+                                             values: [40, 50, 60]))
+    }
 }

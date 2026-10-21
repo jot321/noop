@@ -419,10 +419,10 @@ public enum DayWindow {
         return (addDays(start, -length), addDays(start, -1))
     }
 
-    /// Means of the earlier and later halves, split at the midpoint DATE between the first and last
-    /// day; a day exactly on the midpoint joins the later half (an odd run gives the extra day to the
-    /// recent side). nil when either half is empty. `days` and `values` are parallel.
-    public static func halfMeans(days: [String], values: [Double]) -> (earlier: Double, later: Double)? {
+    /// The values split at the midpoint DATE between the first and last day; a day exactly on the
+    /// midpoint joins the later half (an odd run gives the extra day to the recent side). nil when
+    /// the days don't parse or span a single day. `days` and `values` are parallel.
+    public static func halves(days: [String], values: [Double]) -> (earlier: [Double], later: [Double])? {
         let xs = days.compactMap(dayNumber)
         guard xs.count == values.count, let lo = xs.min(), let hi = xs.max(), hi > lo else { return nil }
         let mid = Double(lo + hi) / 2
@@ -430,8 +430,13 @@ public enum DayWindow {
         for (x, v) in zip(xs, values) {
             if Double(x) < mid { early.append(v) } else { late.append(v) }
         }
-        guard !early.isEmpty, !late.isEmpty else { return nil }
-        return (RangeReportEngine.mean(early), RangeReportEngine.mean(late))
+        return (early, late)
+    }
+
+    /// Means of the two `halves`; nil when either half is empty.
+    public static func halfMeans(days: [String], values: [Double]) -> (earlier: Double, later: Double)? {
+        guard let h = halves(days: days, values: values), !h.earlier.isEmpty, !h.later.isEmpty else { return nil }
+        return (RangeReportEngine.mean(h.earlier), RangeReportEngine.mean(h.later))
     }
 
     /// OLS slope of value against calendar day (units per day). 0 with fewer than two distinct days.

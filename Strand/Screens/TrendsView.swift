@@ -116,15 +116,16 @@ struct TrendsView: View {
         return repo.days.filter { $0.day >= cutoffKey }
     }
 
-    /// Build trend points from a metric accessor over a day slice.
-    private func points(_ days: ArraySlice<DailyMetric>, _ value: (DailyMetric) -> Double?) -> [TrendPoint] {
-        days.compactMap { d in
-            guard let v = value(d), let dt = date(d.day) else { return nil }
-            return TrendPoint(date: dt, value: v)
+    /// Build trend points from a metric accessor over a day slice, with each point's day key (the
+    /// period-change chip splits by date, see `periodChange`).
+    private func points(_ days: [DailyMetric], _ value: (DailyMetric) -> Double?) -> (points: [TrendPoint], days: [String]) {
+        var pts: [TrendPoint] = [], keys: [String] = []
+        for d in days {
+            guard let v = value(d), let dt = date(d.day) else { continue }
+            pts.append(TrendPoint(date: dt, value: v))
+            keys.append(d.day)
         }
-    }
-    private func points(_ days: [DailyMetric], _ value: (DailyMetric) -> Double?) -> [TrendPoint] {
-        points(days[...], value)
+        return (pts, keys)
     }
 
     // MARK: Resolved metric (memoized per body)
@@ -140,6 +141,8 @@ struct TrendsView: View {
     // widened) computation.
     private struct ResolvedMetric {
         var points: [TrendPoint]
+        /// Day key of each point (parallel to `points`).
+        var days: [String]
         var effective: Range
         var widened: Bool
         var caption: String
@@ -149,16 +152,16 @@ struct TrendsView: View {
         // Find the smallest range ≥ selected whose window has ≥1 point, keeping
         // that window's points so we don't re-filter to read them back.
         for r in range.widening {
-            let pts = points(days(for: r), value)
-            if !pts.isEmpty {
-                return ResolvedMetric(points: pts, effective: r,
-                                      widened: r != range, caption: caption(count: pts.count, eff: r))
+            let w = points(days(for: r), value)
+            if !w.points.isEmpty {
+                return ResolvedMetric(points: w.points, days: w.days, effective: r,
+                                      widened: r != range, caption: caption(count: w.points.count, eff: r))
             }
         }
         // No range held data: fall back to ALL (matches effectiveRange()).
-        let pts = points(days(for: .all), value)
-        return ResolvedMetric(points: pts, effective: .all,
-                              widened: .all != range, caption: caption(count: pts.count, eff: .all))
+        let w = points(days(for: .all), value)
+        return ResolvedMetric(points: w.points, days: w.days, effective: .all,
+                              widened: .all != range, caption: caption(count: w.points.count, eff: .all))
     }
 
     /// Caption text from an already-resolved count + effective range. Mirrors
@@ -189,24 +192,23 @@ struct TrendsView: View {
     }
 
     /// The window's trend as a signed mean-of-recent-half minus mean-of-earlier-half. Drives a
-    /// TrendChip so the card reads its direction at a glance, like Today's deltas. nil for a window
-    /// too short to split. `higherIsBetter == nil` (e.g. Effort) keeps the chip neutral.
-    private func periodChange(_ pts: [TrendPoint]) -> Double? {
-        guard pts.count >= 4 else { return nil }
-        let mid = pts.count / 2
-        let earlier = pts.prefix(mid).map(\.value)
-        let recent = pts.suffix(pts.count - mid).map(\.value)
-        guard !earlier.isEmpty, !recent.isEmpty else { return nil }
-        let e = earlier.reduce(0, +) / Double(earlier.count)
-        let r = recent.reduce(0, +) / Double(recent.count)
+    /// TrendChip so the card reads its direction at a glance, like Today's deltas. The halves split
+    /// at the midpoint DATE of the plotted window (DayWindow.halves): split by count, a gap put July
+    /// readings in the "recent" half. nil for fewer than 4 readings or fewer than 2 on either side.
+    /// `higherIsBetter == nil` (e.g. Effort) keeps the chip neutral.
+    static func periodChange(days: [String], values: [Double]) -> Double? {
+        guard values.count >= 4, let h = DayWindow.halves(days: days, values: values),
+              h.earlier.count >= 2, h.later.count >= 2 else { return nil }
+        let e = h.earlier.reduce(0, +) / Double(h.earlier.count)
+        let r = h.later.reduce(0, +) / Double(h.later.count)
         return r - e
     }
 
     /// A TrendChip for a window's period change, coloured green/rose by whether the move is good for
     /// THIS metric (`higherIsBetter`); neutral when direction has no valence or the change is flat.
     @ViewBuilder
-    private func changeChip(_ pts: [TrendPoint], higherIsBetter: Bool?, fmt: @escaping (Double) -> String) -> some View {
-        if let d = periodChange(pts), abs(d) > 0.0001 {
+    private func changeChip(_ m: ResolvedMetric, higherIsBetter: Bool?, fmt: @escaping (Double) -> String) -> some View {
+        if let d = Self.periodChange(days: m.days, values: m.points.map(\.value)), abs(d) > 0.0001 {
             let sign = d >= 0 ? "+" : "−"
             let color: Color = {
                 guard let better = higherIsBetter else { return StrandPalette.textTertiary }
@@ -603,7 +605,7 @@ struct TrendsView: View {
                             ("Low", pts.map(\.value).min().map { "\(Int($0.rounded()))" } ?? "—"),
                             ("Days", "\(pts.count)"),
                         ])
-                        changeChip(pts, higherIsBetter: true, fmt: { "\(Int($0.rounded()))" })
+                        changeChip(recovery, higherIsBetter: true, fmt: { "\(Int($0.rounded()))" })
                     }
                 }
             }
@@ -646,7 +648,7 @@ struct TrendsView: View {
                     title: "Heart rate variability", unit: "ms",
                     accessibilityTitle: String(localized: "Heart rate variability"),
                     metricKey: "hrv",
-                    points: hrvPts,
+                    series: hrv,
                     gradient: gradient(StrandPalette.metricPurple),
                     tip: StrandPalette.metricPurple,
                     tint: StrandPalette.chargeColor,
@@ -658,7 +660,7 @@ struct TrendsView: View {
                     title: "Resting heart rate", unit: "bpm",
                     accessibilityTitle: String(localized: "Resting heart rate"),
                     metricKey: "rhr",
-                    points: rhrPts,
+                    series: rhr,
                     gradient: gradient(StrandPalette.metricRose),
                     tip: StrandPalette.metricRose,
                     tint: StrandPalette.chargeColor,
@@ -672,7 +674,7 @@ struct TrendsView: View {
                     title: "Effort", unit: "/ \(UnitFormatter.effortScaleMax(effortScale))",
                     accessibilityTitle: String(localized: "Effort"),
                     metricKey: "strain",
-                    points: strainPts,
+                    series: strain,
                     // WHOOP: Effort/Strain is always BLUE — a deep→bright blue line, not the amber ramp.
                     gradient: gradient(StrandPalette.effortColor),
                     tip: StrandPalette.effortColor,
@@ -693,7 +695,7 @@ struct TrendsView: View {
         accessibilityTitle: String,
         // MetricCatalog key this small-multiple taps through to (its full MetricDetailView).
         metricKey: String,
-        points pts: [TrendPoint],
+        series: ResolvedMetric,
         subtitle: String? = nil,
         gradient: Gradient,
         tip: Color,
@@ -702,6 +704,7 @@ struct TrendsView: View {
         range: ClosedRange<Double>,
         fmt: @escaping (Double) -> String
     ) -> some View {
+        let pts = series.points
         let avg = mean(pts)
         let card = ChartCard(
             title: title,
@@ -727,7 +730,7 @@ struct TrendsView: View {
                         ("Min", pts.map(\.value).min().map(fmt) ?? "—"),
                         ("Max", pts.map(\.value).max().map(fmt) ?? "—"),
                     ])
-                    changeChip(pts, higherIsBetter: higherIsBetter, fmt: fmt)
+                    changeChip(series, higherIsBetter: higherIsBetter, fmt: fmt)
                 }
             }
         )
