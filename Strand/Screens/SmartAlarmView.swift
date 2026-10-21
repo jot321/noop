@@ -47,21 +47,26 @@ struct SmartAlarmView: View {
     // over a scenic Rest backdrop, so a glance gives the night's shape. It's about winding down to
     // sleep, so it reads in the Rest world (indigo) rather than the brand-green chrome below.
     private var windowHero: some View {
-        ZStack {
+        // The coming night's wake, with its per-day override: the default alone ignored tomorrow's.
+        let tonight = WindDownNudge.tonight(now: Date(), defaultWake: wakeMinutes,
+                                            overrides: perDayOn ? overrides : [:],
+                                            sleepNeed: WindDownNudge.sleepNeedMinutes,
+                                            lead: WindDownNudge.leadMinutes)
+        return ZStack {
             ScenicHeroBackground(domain: .rest)
                 .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
             VStack(alignment: .leading, spacing: 12) {
                 Text("Tonight").strandOverline()
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     heroTime(label: "Wind down",
-                             time: windDownOn ? timeLabel(WindDownNudge.nudgeMinuteOfDay()) : "—",
+                             time: windDownOn ? timeLabel(tonight.nudgeMinute) : "—",
                              tint: StrandPalette.restColor)
                     Image(systemName: "arrow.right")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                     heroTime(label: "Wake",
-                             time: timeLabel(wakeMinutes),
+                             time: timeLabel(tonight.wake),
                              tint: StrandPalette.restBright)
                     Spacer(minLength: 0)
                 }

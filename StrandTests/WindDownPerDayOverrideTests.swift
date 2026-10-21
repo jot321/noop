@@ -80,4 +80,60 @@ final class WindDownPerDayOverrideTests: XCTestCase {
         WindDownNudge.setWakeOverride(weekday: 9, minutes: 8 * 60)   // no weekday 9
         XCTAssertFalse(WindDownNudge.hasPerDayOverrides)
     }
+    // MARK: - Which evening a per-day override fires on
+
+    func testOverrideBeforeMidnightFiresThePreviousEvening() {
+        // Monday wake 07:00, 8 h need + 30 min lead → 22:30 on SUNDAY, not Monday night.
+        let slot = WindDownNudge.nudgeSlot(wakeWeekday: 2, wakeMinutes: 7 * 60, sleepNeed: 8 * 60, lead: 30)
+        XCTAssertEqual(slot.weekday, 1)
+        XCTAssertEqual(slot.minute, 22 * 60 + 30)
+    }
+
+    func testSundayWakeWrapsToSaturday() {
+        let slot = WindDownNudge.nudgeSlot(wakeWeekday: 1, wakeMinutes: 6 * 60, sleepNeed: 8 * 60, lead: 30)
+        XCTAssertEqual(slot.weekday, 7)
+        XCTAssertEqual(slot.minute, 21 * 60 + 30)
+    }
+
+    func testNudgeAfterMidnightStaysOnTheWakeDay() {
+        // Saturday wake 09:00 → 00:30 early Saturday, the same night.
+        let slot = WindDownNudge.nudgeSlot(wakeWeekday: 7, wakeMinutes: 9 * 60, sleepNeed: 8 * 60, lead: 30)
+        XCTAssertEqual(slot.weekday, 7)
+        XCTAssertEqual(slot.minute, 30)
+    }
+
+    // MARK: - The "Tonight" hero
+
+    private var utc: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }
+
+    /// A synthetic Sunday at the given UTC hour (4 Jan 2032 is a Sunday).
+    private func sunday(_ hour: Int) -> Date {
+        utc.date(from: DateComponents(year: 2032, month: 1, day: 4, hour: hour))!
+    }
+
+    func testTonightUsesTomorrowsOverride() {
+        // Sunday evening, Monday has an early 05:30 override → wake 05:30, nudge 21:00.
+        let t = WindDownNudge.tonight(now: sunday(18), calendar: utc, defaultWake: 8 * 60,
+                                      overrides: [2: 5 * 60 + 30], sleepNeed: 8 * 60, lead: 30)
+        XCTAssertEqual(t.wake, 5 * 60 + 30)
+        XCTAssertEqual(t.nudgeMinute, 21 * 60)
+    }
+
+    func testTonightBeforeTodaysWakeIsThisMorning() {
+        // 02:00 on Sunday, before Sunday's 09:00 override: the coming wake is this morning's.
+        let t = WindDownNudge.tonight(now: sunday(2), calendar: utc, defaultWake: 7 * 60,
+                                      overrides: [1: 9 * 60], sleepNeed: 8 * 60, lead: 30)
+        XCTAssertEqual(t.wake, 9 * 60)
+    }
+
+    func testTonightWithoutOverridesUsesTheDefault() {
+        let t = WindDownNudge.tonight(now: sunday(18), calendar: utc, defaultWake: 7 * 60,
+                                      overrides: [:], sleepNeed: 8 * 60, lead: 30)
+        XCTAssertEqual(t.wake, 7 * 60)
+        XCTAssertEqual(t.nudgeMinute, 22 * 60 + 30)
+    }
 }
