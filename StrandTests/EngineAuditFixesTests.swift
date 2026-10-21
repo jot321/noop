@@ -77,9 +77,12 @@ final class EngineAuditFixesTests: XCTestCase {
     /// on a day 400 days ago is not rescored at the in-flight pass's 3 days and missed.
     func testDroppedForcedRescoreRerunsAtTheWiderRequestedWidth() async throws {
         let (engine, _) = try await makeEngine()
-        async let a: Void = engine.analyzeRecent(maxDays: 3)
-        async let b: Void = engine.analyzeRecent(maxDays: 400)
-        _ = await (a, b)
+        // Start the narrow pass first and wait until it holds the lock, so the wide request is the one
+        // dropped (two `async let`s start in either order).
+        let narrow = Task { await engine.analyzeRecent(maxDays: 3) }
+        while !engine.computing { await Task.yield() }
+        await engine.analyzeRecent(maxDays: 400)            // dropped and re-armed
+        await narrow.value
         await settle(engine, passes: 2)
         XCTAssertEqual(engine.passWidths.first, 3)
         XCTAssertEqual(engine.passWidths.last, 400)
