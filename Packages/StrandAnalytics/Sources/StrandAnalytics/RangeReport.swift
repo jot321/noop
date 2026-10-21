@@ -13,10 +13,10 @@ import Foundation
 //   • n            — days carrying a value inside the range
 //   • mean         — average of those values
 //   • min / max    — the lowest / highest value AND the day it fell on
-//   • firstHalf vs secondHalf mean — the range split down the middle (by day position),
-//                    so a reader can see whether the back half ran higher or lower
-//   • trend        — rising / falling / flat, from the OLS slope-per-day of the values
-//                    against a small per-metric threshold (so noise reads as "flat")
+//   • firstHalf vs secondHalf mean — the readings split at the midpoint date between the
+//                    first and last one, so a reader can see whether the back half ran higher
+//   • trend        — rising / falling / flat, from the OLS slope per calendar day of the
+//                    values against a small per-metric threshold (so noise reads as "flat")
 //   • latest       — the value on the latest day present in range
 //
 // Plus the range itself (start / end / totalDays covered) and a short headline stat set
@@ -24,8 +24,8 @@ import Foundation
 //
 // Day keys are the same "yyyy-MM-dd" strings AnalyticsEngine emits; lexicographic order
 // IS chronological order for zero-padded ISO days, so we sort/compare on the raw string
-// (exactly the way WeeklyDigest does) — no Date, no timezone, no locale. This file is
-// self-contained: it does NOT import WeeklyDigest.
+// (exactly the way WeeklyDigest does) — no Date, no timezone, no locale. The engine is
+// self-contained; only the shared DayWindow helpers at the end borrow WeeklyDigest's addDays.
 
 // MARK: - Metric identity
 
@@ -91,14 +91,15 @@ public enum ReportMetric: String, CaseIterable, Sendable {
     }
 
     /// Whether a rising/falling move carries a clear good/bad valence. False for a signed
-    /// deviation metric (skin-temp Δ) and for workout count (more or fewer sessions is a
-    /// lifestyle choice, not inherently good/bad) — the report then shows the trend
-    /// direction without a "good sign / worth a look" verdict, and colours the change chip
-    /// neutrally.
+    /// deviation metric (skin-temp Δ), for workout count (more or fewer sessions is a
+    /// lifestyle choice, not inherently good/bad) and for strain (Effort has no better
+    /// direction in the metric catalog: more load is not a good sign by itself) — the report
+    /// then shows the trend direction without a "good sign / worth a look" verdict, and
+    /// colours the change chip neutrally.
     public var framesGoodBad: Bool {
         switch self {
-        case .skinTempDev, .workouts: return false
-        default:                      return true
+        case .skinTempDev, .workouts, .strain: return false
+        default:                               return true
         }
     }
 
@@ -154,9 +155,9 @@ public struct MetricRangeStat: Equatable, Sendable {
     public let min: DayValue
     /// The highest value and the day it fell on.
     public let max: DayValue
-    /// Mean of the first half of the in-range days (by day position).
+    /// Mean of the readings before the midpoint date of the in-range readings.
     public let firstHalfMean: Double
-    /// Mean of the second half of the in-range days (by day position).
+    /// Mean of the readings on or after that midpoint date.
     public let secondHalfMean: Double
     /// Trend direction over the range (rising / falling / flat).
     public let trend: ReportTrend
@@ -267,17 +268,16 @@ public enum RangeReportEngine {
                 if values[i] > maxDV.value { maxDV = DayValue(day: days[i], value: values[i]) }
             }
 
-            // Split down the middle by POSITION. Odd counts give the larger half to the
-            // second half (the back of the range), so the "recent" read is never starved.
-            let mid = n / 2
-            let firstHalf = Array(values[0..<mid])
-            let secondHalf = Array(values[mid..<n])
-            // With n == 1 the first half is empty; fall back to the single value so the
-            // halves are both defined and equal (→ flat, no fabricated movement).
-            let firstMean = firstHalf.isEmpty ? mn : mean(firstHalf)
-            let secondMean = secondHalf.isEmpty ? mn : mean(secondHalf)
+            // Split at the midpoint DATE between the first and last reading, so a gap in the
+            // data can't put old readings in the "recent" half (DayWindow.halfMeans). With a
+            // single reading both halves fall back to it (equal, so no fabricated movement).
+            let halves = DayWindow.halfMeans(days: days, values: values)
+            let firstMean = halves?.earlier ?? mn
+            let secondMean = halves?.later ?? mn
 
-            let slope = leastSquaresSlope(values)
+            // Slope per calendar day, matching the per-day thresholds; per reading, a month-long
+            // gap counted as one step.
+            let slope = DayWindow.slopePerDay(days: days, values: values)
             let trend = trendFromSlope(slope, threshold: metric.trendSlopeThreshold)
 
             let latest = DayValue(day: days[n - 1], value: values[n - 1])
@@ -387,20 +387,70 @@ public enum RangeReportEngine {
         return values.reduce(0, +) / Double(values.count)
     }
 
-    /// OLS slope of value vs the 0-based index (per-day trend); 0 for < 2 points.
-    static func leastSquaresSlope(_ values: [Double]) -> Double {
-        let n = values.count
-        guard n >= 2 else { return 0 }
-        let meanX = Double(n - 1) / 2.0
-        let meanY = mean(values)
+    static func round1(_ x: Double) -> Double { (x * 10).rounded() / 10 }
+}
+
+// MARK: - Calendar-day windows (shared)
+
+/// Calendar-day arithmetic on "yyyy-MM-dd" keys, shared by the report and the trend screens so every
+/// window, half split and slope counts DAYS, not readings. With the strap off for weeks, counting
+/// readings squeezed a month into one step and mixed July into a "recent" half (2026-10-21). Pure and
+/// timezone-free: callers anchor a window on the local today key (or the latest reading) themselves.
+public enum DayWindow {
+
+    /// The day's position on a continuous day line (its Julian Day Number), nil when unparseable.
+    public static func dayNumber(_ day: String) -> Int? {
+        guard let (y, m, d) = RangeReportEngine.parseYMD(day) else { return nil }
+        return RangeReportEngine.julianDayNumber(y, m, d)
+    }
+
+    /// `day` moved by `n` calendar days.
+    public static func addDays(_ day: String, _ n: Int) -> String { WeeklyDigestEngine.addDays(day, n) }
+
+    /// First day of the trailing `days`-day window that ends on `end` (inclusive).
+    public static func windowStart(endingOn end: String, days: Int) -> String {
+        addDays(end, -(Swift.max(1, days) - 1))
+    }
+
+    /// The window of the same length that ends the day before `start`. nil for an invalid range.
+    public static func previousWindow(start: String, end: String) -> (start: String, end: String)? {
+        guard let a = dayNumber(start), let b = dayNumber(end), b >= a else { return nil }
+        let length = b - a + 1
+        return (addDays(start, -length), addDays(start, -1))
+    }
+
+    /// The values split at the midpoint DATE between the first and last day; a day exactly on the
+    /// midpoint joins the later half (an odd run gives the extra day to the recent side). nil when
+    /// the days don't parse or span a single day. `days` and `values` are parallel.
+    public static func halves(days: [String], values: [Double]) -> (earlier: [Double], later: [Double])? {
+        let xs = days.compactMap(dayNumber)
+        guard xs.count == values.count, let lo = xs.min(), let hi = xs.max(), hi > lo else { return nil }
+        let mid = Double(lo + hi) / 2
+        var early: [Double] = [], late: [Double] = []
+        for (x, v) in zip(xs, values) {
+            if Double(x) < mid { early.append(v) } else { late.append(v) }
+        }
+        return (early, late)
+    }
+
+    /// Means of the two `halves`; nil when either half is empty.
+    public static func halfMeans(days: [String], values: [Double]) -> (earlier: Double, later: Double)? {
+        guard let h = halves(days: days, values: values), !h.earlier.isEmpty, !h.later.isEmpty else { return nil }
+        return (RangeReportEngine.mean(h.earlier), RangeReportEngine.mean(h.later))
+    }
+
+    /// OLS slope of value against calendar day (units per day). 0 with fewer than two distinct days.
+    public static func slopePerDay(days: [String], values: [Double]) -> Double {
+        let xs = days.compactMap(dayNumber)
+        guard xs.count == values.count, xs.count >= 2, let x0 = xs.first else { return 0 }
+        let fx = xs.map { Double($0 - x0) }
+        let meanX = RangeReportEngine.mean(fx)
+        let meanY = RangeReportEngine.mean(values)
         var num = 0.0, den = 0.0
-        for (i, v) in values.enumerated() {
-            let dx = Double(i) - meanX
-            num += dx * (v - meanY)
-            den += dx * dx
+        for (x, v) in zip(fx, values) {
+            num += (x - meanX) * (v - meanY)
+            den += (x - meanX) * (x - meanX)
         }
         return den == 0 ? 0 : num / den
     }
-
-    static func round1(_ x: Double) -> Double { (x * 10).rounded() / 10 }
 }

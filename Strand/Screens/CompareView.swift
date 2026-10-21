@@ -15,16 +15,8 @@ import WhoopStore
 // metric loads from repo.resolvedSeries (freshest-wins across imported / NOOP-computed /
 // compatible Apple Health, PR#196); everything else is derived in-view.
 
-// yyyy-MM-dd → Date, fixed UTC / en_US_POSIX (per task spec).
-private let compareDayParser: DateFormatter = {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.timeZone = TimeZone(identifier: "UTC")
-    f.dateFormat = "yyyy-MM-dd"
-    return f
-}()
-
-private func parseCompareDay(_ day: String) -> Date? { compareDayParser.date(from: day) }
+// yyyy-MM-dd → local midnight, the zone the overlay's axis and tooltip label in (see TrendDayKey).
+private func parseCompareDay(_ day: String) -> Date? { TrendDayKey.date(day) }
 
 // MARK: - Range control (shared spec — W / M / 3M / 6M / 1Y / ALL)
 
@@ -201,17 +193,22 @@ struct CompareView: View {
     private var selectionKey: String { selected.map(\.id).sorted().joined(separator: "|") }
 
     // MARK: - Active windowed series
+    //
+    // Every window ends on today's local day for all series alike (see `slice`).
 
-    /// A full-history series' rows over a given range, taken RELATIVE TO THAT SERIES'
-    /// LATEST data point (not "now"); `.all` returns everything.
+    /// A full-history series' rows over the trailing `days` calendar days ENDING TODAY (the local
+    /// day), the same anchor Trends uses (#23); nil days returns everything. Each series used to
+    /// anchor on its own latest reading, so a "7 days" view put a series that stopped in July next to
+    /// October without a word. Now a stale series' window is empty and auto-widens with the "sparse
+    /// widened" warning. Compared as day keys, so a DST change can't shift the edge.
+    static func slice(_ full: [(day: String, value: Double)], days: Int?, today: String) -> [(day: String, value: Double)] {
+        guard let n = days else { return full }
+        let cutoff = DayWindow.windowStart(endingOn: today, days: n)
+        return full.filter { $0.day >= cutoff && $0.day <= today }
+    }
+
     private func slice(_ full: [(day: String, value: Double)], _ r: CompareRange) -> [(day: String, value: Double)] {
-        guard let n = r.days else { return full }
-        guard let lastDay = full.last?.day, let last = parseCompareDay(lastDay) else { return [] }
-        let cutoff = last.addingTimeInterval(-Double(n - 1) * 86_400)
-        return full.filter { row in
-            guard let d = parseCompareDay(row.day) else { return false }
-            return d >= cutoff
-        }
+        Self.slice(full, days: r.days, today: Repository.localDayKey(Date()))
     }
 
     /// The range actually used for a series: the SELECTED range when its window holds
@@ -454,14 +451,26 @@ struct CompareView: View {
     }
 
     /// A stable fingerprint of the inputs the correlation scan depends on: the
-    /// non-empty series (in order) and their windowed content. Row content only
-    /// changes when `selected`, `range`, or fetched `fullSeries` change, so this
-    /// covers every case that alters the scan result. Used to invalidate `pairCache`.
+    /// non-empty series (in order) and their windowed content, values included
+    /// (`seriesKey`). Used to invalidate `pairCache`.
     private func correlationKey(_ series: [CompareSeries]) -> String {
         series
             .filter { !$0.rows.isEmpty }
-            .map { s in "\(s.id):\(s.rows.count):\(s.rows.first?.day ?? "")>\(s.rows.last?.day ?? "")" }
+            .map { Self.seriesKey(id: $0.id, rows: $0.rows) }
             .joined(separator: "|")
+    }
+
+    /// Cache key for one windowed series: id, count, endpoints AND a hash of every (day, value).
+    /// Count and endpoints alone missed a day re-scored inside the window, so the correlation and
+    /// overlay caches kept the old numbers after a sync. Hashing is O(rows), the same order as the
+    /// slicing that builds `activeSeries` on each body evaluation.
+    static func seriesKey(id: String, rows: [(day: String, value: Double)]) -> String {
+        var h = Hasher()
+        for r in rows {
+            h.combine(r.day)
+            h.combine(r.value)
+        }
+        return "\(id):\(rows.count):\(rows.first?.day ?? "")>\(rows.last?.day ?? ""):\(h.finalize())"
     }
 
     /// Cached accessor used by the body. Returns the memoized scan when the inputs
@@ -473,6 +482,18 @@ struct CompareView: View {
         correlationKey(series) == pairCacheKey ? pairCache : computePairResults(series)
     }
 
+    /// Fewest shared days before Compare reports r, the same floor Explore's "What correlates"
+    /// uses: from 3 or 4 points r swings to ±1 by chance, and Compare called that "very strong".
+    static let minSharedDays = 10
+
+    /// Pearson r over the days two series share, or nil with fewer than `minSharedDays`.
+    static func correlation(_ a: [(day: String, value: Double)],
+                            _ b: [(day: String, value: Double)]) -> (r: Double, n: Int)? {
+        let pairs = CorrelationEngine.alignByDay(a, b)
+        guard pairs.count >= minSharedDays, let c = CorrelationEngine.pearson(pairs) else { return nil }
+        return (c.r, c.n)
+    }
+
     /// The actual (expensive) pairwise scan. Pure — no view state read/written.
     private func computePairResults(_ series: [CompareSeries]) -> [PairResult] {
         var out: [PairResult] = []
@@ -480,8 +501,7 @@ struct CompareView: View {
         guard s.count >= 2 else { return out }
         for i in 0..<(s.count - 1) {
             for j in (i + 1)..<s.count {
-                let pairs = CorrelationEngine.alignByDay(s[i].rows, s[j].rows)
-                guard pairs.count >= 3, let c = CorrelationEngine.pearson(pairs) else { continue }
+                guard let c = Self.correlation(s[i].rows, s[j].rows) else { continue }
                 out.append(PairResult(
                     id: "\(s[i].id)~\(s[j].id)",
                     a: s[i], b: s[j], r: c.r, n: c.n
@@ -513,7 +533,7 @@ struct CompareView: View {
 
             if pairs.isEmpty {
                 NoopCard {
-                    Text("Not enough overlapping days between these metrics in \(range.phrase). Widen the range.")
+                    Text("Too few shared days in \(range.phrase) to compare these metrics. r needs \(Self.minSharedDays). Widen the range.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -833,11 +853,10 @@ private struct OverlayChart: View {
     }
 
     /// Fingerprint of the model's inputs, same idiom as `CompareView.correlationKey`:
-    /// series id + windowed row count + endpoint days. Row content only changes when
-    /// the selection, range, or fetched history changes, so this covers every input.
+    /// one `CompareView.seriesKey` per series, which hashes every windowed value.
     private var modelKey: String {
         series
-            .map { s in "\(s.id):\(s.rows.count):\(s.rows.first?.day ?? "")>\(s.rows.last?.day ?? "")" }
+            .map { CompareView.seriesKey(id: $0.id, rows: $0.rows) }
             .joined(separator: "|")
     }
 

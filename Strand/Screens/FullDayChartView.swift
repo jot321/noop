@@ -42,6 +42,9 @@ struct FullDayChartView: View {
     @State private var ownedOnly = true
 
     @State private var series: Repository.TimelineSeries = .empty
+    /// Exact HR min / mean / max for the visible window, read when the line is bucketed (see
+    /// `footerStats`). nil for raw seconds (the points are exact) and for other metrics.
+    @State private var hrExact: HRWindowStats? = nil
     // #979 spin-off — day annotations, mirroring the classic Today's Overview HR markers: the main
     // night's band (labelled with its duration) and each workout's sport glyph. Day-scoped facts, so
     // they're loaded per shown day (NOT per zoom window — the chart clamps them into the visible
@@ -348,12 +351,21 @@ struct FullDayChartView: View {
         .padding(.top, NoopMetrics.space1 / 2)
     }
 
+    /// The footer's Min / Avg / Max: the exact sample stats when we have them, else the plotted points.
+    /// At day scale the HR line is 5-minute means, so their extremes understated the real peak and
+    /// trough (a 30-second burst to 150 read as a "Max" near 70).
+    static func footerStats(points: [TrendPoint], exact: HRWindowStats?) -> (min: Double, avg: Double, max: Double) {
+        if let exact { return (exact.min, exact.mean, exact.max) }
+        let v = points.map(\.value)
+        return (v.min() ?? 0, v.reduce(0, +) / Double(max(1, v.count)), v.max() ?? 0)
+    }
+
     private var statsFooter: some View {
-        let v = series.points.map(\.value)
+        let s = Self.footerStats(points: series.points, exact: metric == .hr ? hrExact : nil)
         return ChartFooter([
-            ("Min", format(v.min() ?? 0)),
-            ("Avg", format(v.reduce(0, +) / Double(max(1, v.count)))),
-            ("Max", format(v.max() ?? 0)),
+            ("Min", format(s.min)),
+            ("Avg", format(s.avg)),
+            ("Max", format(s.max)),
         ])
     }
 
@@ -383,11 +395,31 @@ struct FullDayChartView: View {
         let pruned = await repo.cloudPrunedDays(
             from: Int(window.lowerBound.timeIntervalSince1970),
             to: Int(window.upperBound.timeIntervalSince1970))
+        let exact = (metric == .hr && !result.isRaw) ? await exactHrStats(window) : nil
         // Guard against a stale task landing after the user moved on.
         guard !Task.isCancelled else { return }
         series = result
+        hrExact = exact
         prunedCloudDays = pruned
         loading = false
+    }
+
+    /// The true HR min / mean / max over `window` from the raw samples, across the same strap ids the
+    /// timeline read unions (the active strap, plus the canonical "my-whoop" history when they differ,
+    /// mirroring Repository's private `importedReadIds`). nil when the raw is gone (a cloud-pruned day
+    /// drawn from its echo), so the footer falls back to the plotted points.
+    private func exactHrStats(_ window: ClosedRange<Date>) async -> HRWindowStats? {
+        guard let store = await repo.storeHandle() else { return nil }
+        let ids = repo.deviceId == Repository.whoopSource ? [repo.deviceId] : [repo.deviceId, Repository.whoopSource]
+        var parts: [HRWindowStats] = []
+        for id in ids {
+            if let s = try? await store.hrWindowStats(deviceId: id,
+                                                       from: Int(window.lowerBound.timeIntervalSince1970),
+                                                       to: Int(window.upperBound.timeIntervalSince1970)) {
+                parts.append(s)
+            }
+        }
+        return HRWindowStats.combined(parts)
     }
 
     /// #979 spin-off — load the shown day's sleep + workouts and scope them EXACTLY like the classic

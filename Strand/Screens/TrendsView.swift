@@ -4,6 +4,34 @@ import StrandAnalytics
 import WhoopStore
 import Foundation
 
+// MARK: - Day keys
+
+/// "yyyy-MM-dd" day keys (the LOCAL calendar day a row belongs to, see `Repository.localDayKey`) to
+/// chart dates, shared by Trends, Compare and Explore. A key parses to midnight in the same zone the
+/// charts, tooltips and heat strip format in: parsed as UTC midnight, "2026-07-14" showed as 13 Jul
+/// west of UTC and sat in Monday's heat-strip row (2026-10-21). The zone is a parameter only so tests
+/// can pin one; the screens use the device zone.
+enum TrendDayKey {
+    /// Midnight that starts `day` in `zone`, nil for a key that isn't a real date. Calendar maths
+    /// rather than a DateFormatter, which returns nil on a day whose midnight a DST jump skips.
+    static func date(_ day: String, in zone: TimeZone = .current) -> Date? {
+        guard let (y, m, d) = WeeklyDigestEngine.parseYMD(day) else { return nil }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = zone
+        return cal.date(from: DateComponents(year: y, month: m, day: d))
+    }
+
+    /// "14 Jul 2026" for `day`, formatted in the zone it was parsed in (Explore's "as of" line).
+    static func longLabel(_ day: String, in zone: TimeZone = .current) -> String? {
+        guard let d = date(day, in: zone) else { return nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = zone
+        f.dateFormat = "d MMM yyyy"
+        return f.string(from: d)
+    }
+}
+
 // MARK: - Trends
 //
 // The longitudinal view, rebuilt on the locked Noop component system so every
@@ -66,15 +94,8 @@ struct TrendsView: View {
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
 
-    // yyyy-MM-dd → Date (en_US_POSIX, UTC), per task spec.
-    private static let dayParser: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-    private func date(_ day: String) -> Date? { Self.dayParser.date(from: day) }
+    // yyyy-MM-dd → local midnight, the zone every chart labels in (see TrendDayKey).
+    private func date(_ day: String) -> Date? { TrendDayKey.date(day) }
 
     // MARK: Window selection (relative to the LATEST day, with auto-expand)
 
@@ -95,15 +116,16 @@ struct TrendsView: View {
         return repo.days.filter { $0.day >= cutoffKey }
     }
 
-    /// Build trend points from a metric accessor over a day slice.
-    private func points(_ days: ArraySlice<DailyMetric>, _ value: (DailyMetric) -> Double?) -> [TrendPoint] {
-        days.compactMap { d in
-            guard let v = value(d), let dt = date(d.day) else { return nil }
-            return TrendPoint(date: dt, value: v)
+    /// Build trend points from a metric accessor over a day slice, with each point's day key (the
+    /// period-change chip splits by date, see `periodChange`).
+    private func points(_ days: [DailyMetric], _ value: (DailyMetric) -> Double?) -> (points: [TrendPoint], days: [String]) {
+        var pts: [TrendPoint] = [], keys: [String] = []
+        for d in days {
+            guard let v = value(d), let dt = date(d.day) else { continue }
+            pts.append(TrendPoint(date: dt, value: v))
+            keys.append(d.day)
         }
-    }
-    private func points(_ days: [DailyMetric], _ value: (DailyMetric) -> Double?) -> [TrendPoint] {
-        points(days[...], value)
+        return (pts, keys)
     }
 
     // MARK: Resolved metric (memoized per body)
@@ -119,6 +141,8 @@ struct TrendsView: View {
     // widened) computation.
     private struct ResolvedMetric {
         var points: [TrendPoint]
+        /// Day key of each point (parallel to `points`).
+        var days: [String]
         var effective: Range
         var widened: Bool
         var caption: String
@@ -128,16 +152,16 @@ struct TrendsView: View {
         // Find the smallest range ≥ selected whose window has ≥1 point, keeping
         // that window's points so we don't re-filter to read them back.
         for r in range.widening {
-            let pts = points(days(for: r), value)
-            if !pts.isEmpty {
-                return ResolvedMetric(points: pts, effective: r,
-                                      widened: r != range, caption: caption(count: pts.count, eff: r))
+            let w = points(days(for: r), value)
+            if !w.points.isEmpty {
+                return ResolvedMetric(points: w.points, days: w.days, effective: r,
+                                      widened: r != range, caption: caption(count: w.points.count, eff: r))
             }
         }
         // No range held data: fall back to ALL (matches effectiveRange()).
-        let pts = points(days(for: .all), value)
-        return ResolvedMetric(points: pts, effective: .all,
-                              widened: .all != range, caption: caption(count: pts.count, eff: .all))
+        let w = points(days(for: .all), value)
+        return ResolvedMetric(points: w.points, days: w.days, effective: .all,
+                              widened: .all != range, caption: caption(count: w.points.count, eff: .all))
     }
 
     /// Caption text from an already-resolved count + effective range. Mirrors
@@ -168,24 +192,23 @@ struct TrendsView: View {
     }
 
     /// The window's trend as a signed mean-of-recent-half minus mean-of-earlier-half. Drives a
-    /// TrendChip so the card reads its direction at a glance, like Today's deltas. nil for a window
-    /// too short to split. `higherIsBetter == nil` (e.g. Effort) keeps the chip neutral.
-    private func periodChange(_ pts: [TrendPoint]) -> Double? {
-        guard pts.count >= 4 else { return nil }
-        let mid = pts.count / 2
-        let earlier = pts.prefix(mid).map(\.value)
-        let recent = pts.suffix(pts.count - mid).map(\.value)
-        guard !earlier.isEmpty, !recent.isEmpty else { return nil }
-        let e = earlier.reduce(0, +) / Double(earlier.count)
-        let r = recent.reduce(0, +) / Double(recent.count)
+    /// TrendChip so the card reads its direction at a glance, like Today's deltas. The halves split
+    /// at the midpoint DATE of the plotted window (DayWindow.halves): split by count, a gap put July
+    /// readings in the "recent" half. nil for fewer than 4 readings or fewer than 2 on either side.
+    /// `higherIsBetter == nil` (e.g. Effort) keeps the chip neutral.
+    static func periodChange(days: [String], values: [Double]) -> Double? {
+        guard values.count >= 4, let h = DayWindow.halves(days: days, values: values),
+              h.earlier.count >= 2, h.later.count >= 2 else { return nil }
+        let e = h.earlier.reduce(0, +) / Double(h.earlier.count)
+        let r = h.later.reduce(0, +) / Double(h.later.count)
         return r - e
     }
 
     /// A TrendChip for a window's period change, coloured green/rose by whether the move is good for
     /// THIS metric (`higherIsBetter`); neutral when direction has no valence or the change is flat.
     @ViewBuilder
-    private func changeChip(_ pts: [TrendPoint], higherIsBetter: Bool?, fmt: @escaping (Double) -> String) -> some View {
-        if let d = periodChange(pts), abs(d) > 0.0001 {
+    private func changeChip(_ m: ResolvedMetric, higherIsBetter: Bool?, fmt: @escaping (Double) -> String) -> some View {
+        if let d = Self.periodChange(days: m.days, values: m.points.map(\.value)), abs(d) > 0.0001 {
             let sign = d >= 0 ? "+" : "−"
             let color: Color = {
                 guard let better = higherIsBetter else { return StrandPalette.textTertiary }
@@ -278,10 +301,10 @@ struct TrendsView: View {
             TrendsReportSheet(days: repo.days)
         }
         // #732 — load the resolved sleep_performance series so Rest plots the SAME composite the Today
-        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
-        // count so a newly-banked/-scored night refreshes Rest reactively, like the other metrics that
-        // read `repo.days` directly (and like the Android LaunchedEffect(days) twin).
-        .task(id: repo.days.count) {
+        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on
+        // `refreshSeq`, which bumps whenever the merged history changes: the day COUNT missed a night
+        // re-scored in place, so Rest kept the old value (2026-10-21).
+        .task(id: repo.refreshSeq) {
             let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
             sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         }
@@ -348,7 +371,8 @@ struct TrendsView: View {
     /// self-hides only when there's no data in ANY week (an all-empty history), matching the old card.
     @ViewBuilder
     private var weeklyDigestNav: some View {
-        let digest = WeeklyDigestSource.digest(from: repo.days, anchorDay: weekAnchorDay)
+        let digest = WeeklyDigestSource.digest(from: repo.days, anchorDay: weekAnchorDay,
+                                               today: Repository.localDayKey(Date()))
         // Only hide the navigation entirely when the WHOLE history is empty — an empty PAST week still
         // shows the header + chevrons so the user can step to a week that does hold data.
         if repo.days.isEmpty {
@@ -363,7 +387,7 @@ struct TrendsView: View {
                 if digest.isEmpty {
                     // This particular week had no readings — keep the chevrons above so the user can move on.
                     DataPendingNote(
-                        title: "No readings this week",
+                        title: weekOffset == 0 ? "No readings this week" : "No readings that week",
                         message: "Step to another week with the arrows above to see its review.")
                 } else {
                     WeeklyDigestContent(digest: digest, compact: true)
@@ -581,7 +605,7 @@ struct TrendsView: View {
                             ("Low", pts.map(\.value).min().map { "\(Int($0.rounded()))" } ?? "—"),
                             ("Days", "\(pts.count)"),
                         ])
-                        changeChip(pts, higherIsBetter: true, fmt: { "\(Int($0.rounded()))" })
+                        changeChip(recovery, higherIsBetter: true, fmt: { "\(Int($0.rounded()))" })
                     }
                 }
             }
@@ -624,7 +648,7 @@ struct TrendsView: View {
                     title: "Heart rate variability", unit: "ms",
                     accessibilityTitle: String(localized: "Heart rate variability"),
                     metricKey: "hrv",
-                    points: hrvPts,
+                    series: hrv,
                     gradient: gradient(StrandPalette.metricPurple),
                     tip: StrandPalette.metricPurple,
                     tint: StrandPalette.chargeColor,
@@ -636,7 +660,7 @@ struct TrendsView: View {
                     title: "Resting heart rate", unit: "bpm",
                     accessibilityTitle: String(localized: "Resting heart rate"),
                     metricKey: "rhr",
-                    points: rhrPts,
+                    series: rhr,
                     gradient: gradient(StrandPalette.metricRose),
                     tip: StrandPalette.metricRose,
                     tint: StrandPalette.chargeColor,
@@ -650,13 +674,15 @@ struct TrendsView: View {
                     title: "Effort", unit: "/ \(UnitFormatter.effortScaleMax(effortScale))",
                     accessibilityTitle: String(localized: "Effort"),
                     metricKey: "strain",
-                    points: strainPts,
+                    series: strain,
                     // WHOOP: Effort/Strain is always BLUE — a deep→bright blue line, not the amber ramp.
                     gradient: gradient(StrandPalette.effortColor),
                     tip: StrandPalette.effortColor,
                     tint: StrandPalette.effortColor,
                     higherIsBetter: nil,
                     range: valueRange(strainPts, fallback: 0...100),
+                    // The Y axis prints the same scale as `fmt` (0–21 or 0–100).
+                    axisScale: UnitFormatter.effortValue(1, scale: effortScale),
                     fmt: { UnitFormatter.effortDisplay($0, scale: effortScale) }
                 )
             }
@@ -671,15 +697,17 @@ struct TrendsView: View {
         accessibilityTitle: String,
         // MetricCatalog key this small-multiple taps through to (its full MetricDetailView).
         metricKey: String,
-        points pts: [TrendPoint],
+        series: ResolvedMetric,
         subtitle: String? = nil,
         gradient: Gradient,
         tip: Color,
         tint: Color,
         higherIsBetter: Bool?,
         range: ClosedRange<Double>,
+        axisScale: Double = 1,
         fmt: @escaping (Double) -> String
     ) -> some View {
+        let pts = series.points
         let avg = mean(pts)
         let card = ChartCard(
             title: title,
@@ -691,7 +719,8 @@ struct TrendsView: View {
                 if pts.count >= 2 {
                     glowChart(points: pts, gradient: gradient, valueRange: range,
                               tip: tip, valueFormat: { "\(fmt($0)) \(unit)" },
-                              accessibilityLabel: String(localized: "\(accessibilityTitle) trend"))
+                              accessibilityLabel: String(localized: "\(accessibilityTitle) trend"),
+                              axisScale: axisScale)
                 } else {
                     sparsePlaceholder
                 }
@@ -705,7 +734,7 @@ struct TrendsView: View {
                         ("Min", pts.map(\.value).min().map(fmt) ?? "—"),
                         ("Max", pts.map(\.value).max().map(fmt) ?? "—"),
                     ])
-                    changeChip(pts, higherIsBetter: higherIsBetter, fmt: fmt)
+                    changeChip(series, higherIsBetter: higherIsBetter, fmt: fmt)
                 }
             }
         )
@@ -718,15 +747,26 @@ struct TrendsView: View {
 
     // MARK: Year heat-strip
 
+    /// Rows for the heat strip, chosen by DATE: the 365 calendar days ending `today`, or all history
+    /// on ALL when it reaches back further (then `allHistory` is true, for the title).
+    /// `days.suffix(365)` counted rows, so with gaps a "past year" strip reached back more than a year.
+    static func yearStripRows(_ days: [DailyMetric], range: Range, today: String) -> (rows: [DailyMetric], allHistory: Bool) {
+        let yearStart = DayWindow.windowStart(endingOn: today, days: 365)
+        let reachesBack = (days.first?.day).map { $0 < yearStart } ?? false
+        let start = (range == .all && reachesBack) ? (days.first?.day ?? yearStart) : yearStart
+        return (days.filter { $0.day >= start && $0.day <= today }, range == .all && reachesBack)
+    }
+
     private var yearStrip: some View {
-        // Always show at least a full year for context; expand to all history on ALL.
-        let stripDays = max(range.days ?? repo.days.count, 365)
-        let recent = repo.days.suffix(stripDays)
-        let recoveryDays: [RecoveryDay] = recent.compactMap { d in
+        // Always show the past year for context; expand to all history on ALL. The strip runs to
+        // today, so days since the newest reading show as empty squares.
+        let today = Repository.localDayKey(Date())
+        let strip = Self.yearStripRows(repo.days, range: range, today: today)
+        let recoveryDays: [RecoveryDay] = strip.rows.compactMap { d in
             guard let dt = date(d.day) else { return nil }
             return RecoveryDay(date: dt, score: d.recovery)
         }
-        let title = (range == .all && repo.days.count > 365) ? String(localized: "Charge (all history)") : String(localized: "Charge (past year)")
+        let title = strip.allHistory ? String(localized: "Charge (all history)") : String(localized: "Charge (past year)")
         return NoopCard(tint: StrandPalette.chargeColor) {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 SectionHeader("\(title)", overline: "Calendar", trailing: String(localized: "\(recoveryDays.filter { $0.score != nil }.count) days"))
@@ -734,7 +774,8 @@ struct TrendsView: View {
                     sparsePlaceholder.frame(height: 120)
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        YearHeatStrip(days: recoveryDays).padding(.vertical, NoopMetrics.space1 / 2)
+                        YearHeatStrip(days: recoveryDays, through: date(today))
+                            .padding(.vertical, NoopMetrics.space1 / 2)
                     }
                     Divider().overlay(StrandPalette.hairline)
                     legend
@@ -771,14 +812,14 @@ struct TrendsView: View {
     @ViewBuilder
     private func glowChart(points pts: [TrendPoint], gradient: Gradient, valueRange: ClosedRange<Double>,
                            tip: Color, valueFormat: @escaping (Double) -> String,
-                           accessibilityLabel: String) -> some View {
+                           accessibilityLabel: String, axisScale: Double = 1) -> some View {
         // One crisp, interactive line + area — flat, no blurred glow copy underneath (WHOOP language).
         // The "now" end-cap is drawn INSIDE this chart (nowCapColor) so it's mapped by the chart's own
         // scales and lands on the line — the previous sibling overlay guessed the plot insets and
         // floated the dot left/below the curve (#458).
         TrendChart(points: pts, gradient: gradient, valueRange: valueRange,
                    showsArea: true, height: NoopMetrics.chartHeight, valueFormat: valueFormat,
-                   accessibilityLabel: accessibilityLabel, nowCapColor: tip)
+                   accessibilityLabel: accessibilityLabel, nowCapColor: tip, axisScale: axisScale)
     }
 
     private var sparsePlaceholder: some View {

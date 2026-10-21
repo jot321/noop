@@ -24,11 +24,12 @@ import Foundation
 
 enum WeeklyDigestSource {
 
-    /// Build the digest for the week containing today's local day from a DailyMetric
-    /// history. Extracts each tracked metric into a "yyyy-MM-dd"→value map and hands
-    /// it to the pure engine.
+    /// Build the digest for the week containing `anchorDay` from a DailyMetric history.
+    /// Extracts each tracked metric into a "yyyy-MM-dd"→value map and hands it to the pure
+    /// engine. A week other than the one containing `today` gets past-tense prose.
     static func digest(from days: [DailyMetric],
                        anchorDay: String,
+                       today: String = WhoopStore.localDayKey(Date()),
                        effortDisplayFactor: Double = UnitPrefs.currentEffortDisplayFactor()) -> WeeklyDigest {
         var charge: [String: Double] = [:]
         var effort: [String: Double] = [:]
@@ -43,10 +44,13 @@ enum WeeklyDigestSource {
             if let v = d.restingHr { rhr[d.day] = Double(v) }
             if let v = d.avgHrv    { hrv[d.day] = v }
         }
+        let isCurrentWeek = WeeklyDigestEngine.mondayOfWeek(containing: anchorDay)
+            == WeeklyDigestEngine.mondayOfWeek(containing: today)
         return WeeklyDigestEngine.build(
             byMetric: [.charge: charge, .effort: effort, .rest: rest, .rhr: rhr, .hrv: hrv],
             anchorDay: anchorDay,
-            effortDisplayFactor: effortDisplayFactor)
+            effortDisplayFactor: effortDisplayFactor,
+            isCurrentWeek: isCurrentWeek)
     }
 
     /// The 0–100 Rest composite for a persisted day, via AnalyticsEngine's display-path

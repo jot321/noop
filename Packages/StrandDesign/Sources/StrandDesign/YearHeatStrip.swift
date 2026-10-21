@@ -36,14 +36,17 @@ public struct YearHeatStrip: View {
     public var valueFormat: (Double) -> String
 
     /// The week-column layout, built ONCE here in `init` from the sorted days rather than on every
-    /// `body` eval. `buildWeeks()` reads `.component` for up to 365 days, and `body` re-ran on every
+    /// `body` eval. `buildWeeks()` walks every calendar day in the range, and `body` re-ran on every
     /// hover (which mutates `@State hoverCell`) — so the layout was being recomputed on each pointer
     /// move. Since the struct is only re-created when `days` actually changes, computing it here
     /// memoizes the layout on `days` identity for free, with no behaviour change.
     private let weeks: [Week]
 
+    /// - Parameter endDate: the last calendar day to draw (e.g. today), so days after the newest reading
+    ///   show as empty squares rather than the strip ending early. nil ends at the newest day given.
     public init(
         days: [RecoveryDay],
+        through endDate: Date? = nil,
         cellSize: CGFloat = 12,
         spacing: CGFloat = 3,
         showsMonthLabels: Bool = true,
@@ -57,7 +60,7 @@ public struct YearHeatStrip: View {
         self.showsMonthLabels = showsMonthLabels
         self.showsHover = showsHover
         self.valueFormat = valueFormat
-        self.weeks = YearHeatStrip.buildWeeks(from: sorted)
+        self.weeks = YearHeatStrip.buildWeeks(from: sorted, through: endDate, calendar: Self.calendar)
     }
 
     // The grid layout constants used both for drawing and hover hit-testing.
@@ -78,45 +81,55 @@ public struct YearHeatStrip: View {
     }()
 
     // Group days into week columns. weekday 0 = Monday ... 6 = Sunday.
-    private struct Week: Identifiable {
+    struct Week: Identifiable {
         let id = UUID()
         var cells: [RecoveryDay?] // length 7, indexed by weekday row
         var monthLabel: String?
     }
 
-    /// Pure: group the (already-sorted) days into Monday-first week columns. Static so it can run once
-    /// from `init` (no instance state is read — only the static calendar + formatter cache).
-    private static func buildWeeks(from days: [RecoveryDay]) -> [Week] {
-        guard let first = days.first?.date else { return [] }
-        var weeks: [Week] = []
-        var current = Week(cells: Array(repeating: nil, count: 7), monthLabel: nil)
-        var lastMonth = -1
-        // Pad the first week so the first day lands on its weekday row.
-        let firstRow = weekdayRow(first)
-        var filledThisWeek = 0
-        for _ in 0..<firstRow { filledThisWeek += 1 }
+    /// Pure: lay the (already-sorted) days out as Monday-first week columns over the CONTINUOUS
+    /// calendar range from the first day through `end` (or the last day). Every date in that range
+    /// gets a cell (a day with no entry is drawn as an empty "no data" square) and a new column
+    /// starts whenever the Monday of the week changes. The old walk started a column only when a
+    /// Monday row appeared and skipped missing days, so after a gap a later Tuesday landed in an
+    /// old column and overwrote that column's Tuesday (2026-10-21). Static so it runs once from
+    /// `init`; `calendar` is a parameter so tests can pin a zone.
+    static func buildWeeks(from days: [RecoveryDay], through end: Date?, calendar: Calendar) -> [Week] {
+        guard let firstDate = days.first?.date, let lastDate = days.last?.date else { return [] }
+        let start = calendar.startOfDay(for: firstDate)
+        let stop = calendar.startOfDay(for: max(lastDate, end ?? lastDate))
+        // One entry per calendar day (the later entry wins a duplicate day).
+        var byDay: [Date: RecoveryDay] = [:]
+        for d in days { byDay[calendar.startOfDay(for: d.date)] = d }
 
-        for day in days {
-            let row = weekdayRow(day.date)
-            if row == 0 && filledThisWeek > 0 {
-                weeks.append(current)
-                current = Week(cells: Array(repeating: nil, count: 7), monthLabel: nil)
-                filledThisWeek = 0
+        var weeks: [Week] = []
+        var currentMonday: Date?
+        var lastMonth = -1
+        var day = start
+        var guardDays = 0
+        // ~20 years at most, so a corrupt far-past date can't spin the layout.
+        while day <= stop && guardDays < 7_400 {
+            let row = weekdayRow(day, calendar)
+            let monday = calendar.date(byAdding: .day, value: -row, to: day) ?? day
+            if monday != currentMonday {
+                weeks.append(Week(cells: Array(repeating: nil, count: 7), monthLabel: nil))
+                currentMonday = monday
             }
-            current.cells[row] = day
-            // tag month label at the first cell of a new month
-            let month = calendar.component(.month, from: day.date)
+            weeks[weeks.count - 1].cells[row] = byDay[day] ?? RecoveryDay(date: day, score: nil)
+            // Tag the column where each month first appears.
+            let month = calendar.component(.month, from: day)
             if month != lastMonth {
-                current.monthLabel = monthShort(day.date)
+                weeks[weeks.count - 1].monthLabel = monthShort(day)
                 lastMonth = month
             }
-            filledThisWeek += 1
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+            guardDays += 1
         }
-        if filledThisWeek > 0 { weeks.append(current) }
         return weeks
     }
 
-    private static func weekdayRow(_ date: Date) -> Int {
+    private static func weekdayRow(_ date: Date, _ calendar: Calendar) -> Int {
         // Map Calendar weekday (1=Sun...7=Sat) to Monday-first 0...6.
         let wd = calendar.component(.weekday, from: date)
         return (wd + 5) % 7

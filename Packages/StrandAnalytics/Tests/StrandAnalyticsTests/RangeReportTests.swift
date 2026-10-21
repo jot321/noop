@@ -316,6 +316,21 @@ final class RangeReportTests: XCTestCase {
         XCTAssertFalse(line.contains("worth a look"))
     }
 
+    /// Strain (Effort) has no better direction, so a rising trend carries no verdict (2026-10-21).
+    func testStrainRisingHasNoGoodBadFrame() {
+        let strain: [String: Double] = [
+            "2026-06-01": 30, "2026-06-02": 40, "2026-06-03": 50, "2026-06-04": 60,
+        ]
+        let s = RangeReportEngine.build(metrics: [.strain: strain],
+                                        start: "2026-06-01", end: "2026-06-04").stat(.strain)!
+        XCTAssertEqual(s.trend, .rising)
+        XCTAssertFalse(ReportMetric.strain.framesGoodBad)
+        let line = RangeReportEngine.headline(s)
+        XCTAssertTrue(line.contains("trending up"))
+        XCTAssertFalse(line.contains("good sign"))
+        XCTAssertFalse(line.contains("worth a look"))
+    }
+
     /// Stress: lower is better, so a rising daily stress score reads as "worth a look".
     func testStressRisingIsWorthALook() {
         // +0.2/day vs the 0.02 threshold → rising. Higher stress is worse.

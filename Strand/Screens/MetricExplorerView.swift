@@ -19,25 +19,11 @@ import WhoopStore
 // distinct); only when it holds ZERO points do we auto-expand to the smallest larger
 // range that does. The hero always shows the latest available point + "as of <date>".
 
-// yyyy-MM-dd → Date, fixed UTC / en_US_POSIX (per task spec).
-private let strandDayParser: DateFormatter = {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.timeZone = TimeZone(identifier: "UTC")
-    f.dateFormat = "yyyy-MM-dd"
-    return f
-}()
+// yyyy-MM-dd → local midnight, the zone the chart and its tooltip label in (see TrendDayKey).
+private func parseDay(_ day: String) -> Date? { TrendDayKey.date(day) }
 
-private func parseDay(_ day: String) -> Date? { strandDayParser.date(from: day) }
-
-/// "9 Jun 2026" — long, locale-stable date for the hero "as of" line.
-private func longDate(_ d: Date) -> String {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.timeZone = TimeZone(identifier: "UTC")
-    f.dateFormat = "d MMM yyyy"
-    return f.string(from: d)
-}
+/// "9 Jun 2026" — long, locale-stable date for the hero "as of" line, in the same local zone.
+private func longDate(_ day: String) -> String? { TrendDayKey.longLabel(day) }
 
 /// The category accent (colour communicates category only — never decoration).
 private func metricAccent(_ m: MetricDescriptor) -> Color {
@@ -439,31 +425,38 @@ struct MetricDetailView: View {
     @State private var heroAnimatedFraction: Double = 0
     /// Full ascending series for this metric — ALL history.
     @State private var series: [(day: String, value: Double)] = []
-    /// Every OTHER catalog series, loaded once for the correlation scan.
+    /// Every OTHER catalog series, for the correlation scan. Loaded by the correlation card's own
+    /// task AFTER this metric's series (see `loadOthers`), so the chart and stats never wait on it.
     @State private var others: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
     @State private var loaded = false
+    /// True once `others` has been read; until then the card says it is still checking rather than
+    /// "nothing correlates".
+    @State private var othersLoaded = false
+    /// The in-flight off-main correlation scan, cancelled when a newer one starts.
+    @State private var correlationTask: Task<Void, Never>?
 
-    /// Cached correlation scan, keyed by its inputs (selected range + the metric id),
+    /// Cached correlation scan, keyed by its inputs (metric id + selected range + data generation),
     /// so the full cross-catalog Pearson sweep runs ONLY when those change — not on
     /// every body re-eval (hover / 1 Hz HR ticks / animation). Recomputed from
     /// `recomputeCorrelations(...)` after load and on range change.
     @State private var correlationCache: [CorrRow] = []
     /// The (metricID, range) the cache was built for; nil means "not yet computed".
     @State private var correlationKey: String? = nil
+    /// Bumped each time `load()` or `loadOthers()` replaces data, so the correlation cache can't
+    /// outlive the data it was built from.
+    @State private var dataGeneration = 0
     private var loadTaskID: String { "\(metric.id)|\(repo.refreshSeq)" }
 
     // MARK: Derived
 
     /// The trailing-N-days slice for a given range, taken RELATIVE TO THE LATEST data
-    /// point (not "now") — `.all` returns everything.
+    /// point (not "now") — `.all` returns everything. Compared as day keys: local midnights are
+    /// not 86 400 s apart across a DST change.
     private func slice(for r: ExploreRange) -> [(day: String, value: Double)] {
         guard let days = r.days else { return series }
-        guard let lastDay = series.last?.day, let last = parseDay(lastDay) else { return [] }
-        let cutoff = last.addingTimeInterval(-Double(days - 1) * 86_400)
-        return series.filter { row in
-            guard let d = parseDay(row.day) else { return false }
-            return d >= cutoff
-        }
+        guard let lastDay = series.last?.day, DayWindow.dayNumber(lastDay) != nil else { return [] }
+        let cutoff = DayWindow.windowStart(endingOn: lastDay, days: days)
+        return series.filter { $0.day >= cutoff }
     }
 
     /// The range actually shown: the SELECTED range whenever its window holds ≥1
@@ -493,12 +486,12 @@ struct MetricDetailView: View {
         return .all
     }
 
-    /// Whole days between the first and last reading (0 for a single point). The
-    /// UTC-fixed day parser makes the Int truncation exact.
+    /// Whole days between the first and last reading (0 for a single point), counted on day keys
+    /// so a DST change can't shave a day off.
     private var historySpanDays: Int {
         guard let firstDay = series.first?.day, let lastDay = series.last?.day,
-              let first = parseDay(firstDay), let last = parseDay(lastDay) else { return 0 }
-        return Int(last.timeIntervalSince(first) / 86_400)
+              let first = DayWindow.dayNumber(firstDay), let last = DayWindow.dayNumber(lastDay) else { return 0 }
+        return last - first
     }
 
     /// Whether a range chip is selectable (#943, reimplemented from ryanbr's PR): a longer
@@ -524,18 +517,15 @@ struct MetricDetailView: View {
     /// the caption, so the dimmed chips read as "not yet" rather than broken.
     private var hasLockedRanges: Bool { !ExploreRange.allCases.allSatisfy(isUnlocked) }
 
-    /// The window immediately preceding the active one (equal length, by day count).
-    private func previousWindow(effectiveRange: ExploreRange,
-                                windowed: [(day: String, value: Double)]) -> [(day: String, value: Double)] {
-        guard effectiveRange != .all else { return [] }
-        let size = windowed.count
-        guard size > 0 else { return [] }
-        // Index of the active window's first row, then step back `size` rows.
-        guard let firstDay = windowed.first?.day,
-              let lo = series.firstIndex(where: { $0.day == firstDay }) else { return [] }
-        let prevLo = max(0, lo - size)
-        guard prevLo < lo else { return [] }
-        return Array(series[prevLo..<lo])
+    /// The readings in the window immediately before the active one: the same number of CALENDAR
+    /// days ending the day before it starts. The active window ends on the latest reading (see
+    /// `slice(for:)`). Stepping back the same number of READINGS compared June with May across a
+    /// gap; now an empty prior period reads "no prior <range>". Empty for ALL.
+    static func previousWindow(series: [(day: String, value: Double)], days: Int?) -> [(day: String, value: Double)] {
+        guard let days, let last = series.last?.day,
+              let prev = DayWindow.previousWindow(start: DayWindow.windowStart(endingOn: last, days: days),
+                                                  end: last) else { return [] }
+        return series.filter { $0.day >= prev.start && $0.day <= prev.end }
     }
 
     private func trendPoints(_ windowed: [(day: String, value: Double)]) -> [TrendPoint] {
@@ -571,17 +561,25 @@ struct MetricDetailView: View {
         return (lo...hi, s.mean)
     }
 
-    /// A short "vs your normal" readout for the hero (WS-4a HRV / WS-4b RHR): the recent 7-reading
-    /// average against the personal-baseline center, as a signed percentage. This is what makes a score
+    /// A short "vs your normal" readout for the hero (WS-4a HRV / WS-4b RHR): the last 7 days' average
+    /// (`recentMean`) against the personal-baseline center, as a signed percentage. This is what makes a score
     /// legible against the research's "trend vs personal baseline, within ~10% normal" frame — e.g. HRV
     /// reads "12% below your normal" instead of a bare number. nil without a band or enough recent points.
     /// The colour reads the deviation's *direction* against `higherIsBetter` (a drop in HRV is a warning,
     /// a drop in RHR is positive); neutral within the band or when the metric has no better-direction.
-    private var baselineStatus: (text: String, color: Color)? {
-        guard let b = baselineBand else { return nil }
-        let recent = Array(series.suffix(7)).map(\.value)
+    /// The "recent" average the baseline status reads: readings from the last 7 calendar days
+    /// ending today, and at least 3 of them, else nil (the status hides). The last 7 READINGS
+    /// could be from August and still be called "below your normal" today.
+    static func recentMean(_ series: [(day: String, value: Double)], today: String) -> Double? {
+        let start = DayWindow.windowStart(endingOn: today, days: 7)
+        let recent = series.filter { $0.day >= start && $0.day <= today }.map(\.value)
         guard recent.count >= 3 else { return nil }
-        let mean = recent.reduce(0, +) / Double(recent.count)
+        return recent.reduce(0, +) / Double(recent.count)
+    }
+
+    private var baselineStatus: (text: String, color: Color)? {
+        guard let b = baselineBand,
+              let mean = Self.recentMean(series, today: Repository.localDayKey(Date())) else { return nil }
         let center = b.center
         guard center != 0 else { return nil }
         let pct = (mean - center) / abs(center) * 100
@@ -651,18 +649,33 @@ struct MetricDetailView: View {
         // overnight keys render as %). Correlation is scale-invariant, so `others` stays raw.
         let scale = metric.displayScale
         series = scale == 1 ? raw : raw.map { (day: $0.day, value: $0.value * scale) }
-        var loadedOthers: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
-        for other in MetricCatalog.all where other.id != metric.id {
-            let s = await repo.exploreSeries(key: other.key, source: other.source)
-            if !s.isEmpty { loadedOthers.append((other, s)) }
-        }
-        others = loadedOthers
+        dataGeneration += 1
         loaded = true
         // #943 selection seam: a locked default (.month with under a week of history) no longer
         // OVERWRITES @State range - it renders through `coercedSelection` instead (non-destructive,
         // recomputed every body eval), so a shrinking history re-coerces and a growing one un-coerces
         // with no snap-back. See `coercedSelection`.
-        // First correlation build, now that `series`/`others` exist.
+        // Rebuild the correlations for the new series (a no-op until `others` has loaded).
+        recomputeCorrelations()
+    }
+
+    /// Read every other catalog series for "What correlates". This used to run inside `load()`, so the
+    /// whole detail showed "Reading…" until ~80 sequential catalog reads (each hopping to the main
+    /// actor) had finished, on every open and every refresh (2026-10-21). It now runs as the card's
+    /// own task once the chart has painted, yielding between reads so scrolling stays responsive. The
+    /// reads and the scan are unchanged, so the rows are the same.
+    private func loadOthers() async {
+        var loadedOthers: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
+        for other in MetricCatalog.all where other.id != metric.id {
+            guard !Task.isCancelled else { return }
+            let s = await repo.exploreSeries(key: other.key, source: other.source)
+            if !s.isEmpty { loadedOthers.append((other, s)) }
+            await Task.yield()
+        }
+        guard !Task.isCancelled else { return }
+        others = loadedOthers
+        othersLoaded = true
+        dataGeneration += 1
         recomputeCorrelations()
     }
 
@@ -681,8 +694,8 @@ struct MetricDetailView: View {
         let value = latest?.value
         let heroValue = latest.map { fmt($0.value) } ?? "—"
         let asOf: String = {
-            guard let day = latest?.day, let d = parseDay(day) else { return "—" }
-            return String(localized: "as of \(longDate(d))")
+            guard let day = latest?.day, let label = longDate(day) else { return "—" }
+            return String(localized: "as of \(label)")
         }()
         let fraction = value.flatMap { metricGaugeFraction(metric, value: $0) }
 
@@ -858,8 +871,8 @@ struct MetricDetailView: View {
                            windowed: [(day: String, value: Double)],
                            windowFellBack: Bool) -> some View {
         let asOf: String = {
-            guard let day = latest?.day, let d = parseDay(day) else { return "—" }
-            return String(localized: "as of \(longDate(d))")
+            guard let day = latest?.day, let label = longDate(day) else { return "—" }
+            return String(localized: "as of \(label)")
         }()
         let heroValue = latest.map { fmt($0.value) } ?? "—"
         let subtitle = windowFellBack
@@ -889,7 +902,10 @@ struct MetricDetailView: View {
                 height: NoopMetrics.chartHeight,
                 valueFormat: { fmt($0) },
                 baselineBand: band?.band,
-                baselineCenter: band?.center
+                baselineCenter: band?.center,
+                // Effort ("strain") is plotted 0–100 but read on the chosen scale: the Y axis prints
+                // the same numbers the scrub bubble does.
+                axisScale: metric.key == "strain" ? UnitFormatter.effortValue(1, scale: effortScale) : 1
             )
         } footer: {
             ChartFooter(footerItems(band: band, effectiveRange: effectiveRange,
@@ -917,8 +933,8 @@ struct MetricDetailView: View {
         let windowValues = windowed.map(\.value)
         let s = ComparisonEngine.stat(windowValues)
         let cmp = ComparisonEngine.compare(current: windowValues,
-                                           previous: previousWindow(effectiveRange: effectiveRange,
-                                                                    windowed: windowed).map(\.value))
+                                           previous: Self.previousWindow(series: series,
+                                                                         days: effectiveRange.days).map(\.value))
         let accent = metricAccent(metric)
 
         // Δ vs previous equal-length window. Tinted by higherIsBetter.
@@ -958,23 +974,23 @@ struct MetricDetailView: View {
     }
 
     private var latestCaption: String? {
-        guard let day = latest?.day, let d = parseDay(day) else { return nil }
-        return longDate(d)
+        guard let day = latest?.day else { return nil }
+        return longDate(day)
     }
 
     // MARK: Correlations
 
-    private struct CorrRow: Identifiable {
+    struct CorrRow: Identifiable {
         let id: String
         let metric: MetricDescriptor
         let r: Double
         let n: Int
     }
 
-    /// Top |r| catalog metrics over a given window (|r| ≥ 0.30, n ≥ 10). Pure — takes
-    /// the window so the heavy scan can be driven from `recomputeCorrelations()` into
-    /// the `@State` cache instead of running inside `body`.
-    private func computeCorrelationRows(windowed: [(day: String, value: Double)]) -> [CorrRow] {
+    /// Top |r| catalog metrics over a given window (|r| ≥ 0.30, n ≥ 10). Pure and nonisolated, so
+    /// `recomputeCorrelations()` runs it off the main actor and stores the result in the cache.
+    nonisolated static func correlationRows(windowed: [(day: String, value: Double)],
+                                            others: [(metric: MetricDescriptor, series: [(day: String, value: Double)])]) -> [CorrRow] {
         let myDays = Set(windowed.map(\.day))
         guard !myDays.isEmpty else { return [] }
         var rows: [CorrRow] = []
@@ -990,14 +1006,31 @@ struct MetricDetailView: View {
         return Array(rows.prefix(6))
     }
 
+    /// The correlation cache key: metric, range AND the load generation. Without the generation a
+    /// refresh that brought new data kept the old "What correlates" rows (the key never changed).
+    static func correlationCacheKey(metricID: String, range: ExploreRange, dataGeneration: Int) -> String {
+        "\(metricID)|\(range.rawValue)|\(dataGeneration)"
+    }
+
     /// Rebuild the cached correlation scan for the CURRENT effective window, but only
-    /// when its key (metric id + selected range) actually changed — so re-evals that
-    /// don't alter the inputs (hover / HR ticks) are no-ops.
+    /// when its key (metric id + selected range + data generation) actually changed — so
+    /// re-evals that don't alter the inputs (hover / HR ticks) are no-ops. The Pearson sweep over
+    /// every catalog series runs off the main actor; a result for an outdated key is dropped.
     private func recomputeCorrelations() {
-        let key = "\(metric.id)|\(range.rawValue)"
+        guard othersLoaded else { return }
+        let key = Self.correlationCacheKey(metricID: metric.id, range: range, dataGeneration: dataGeneration)
         guard correlationKey != key else { return }
         correlationKey = key
-        correlationCache = computeCorrelationRows(windowed: slice(for: effectiveRange))
+        let windowed = slice(for: effectiveRange)
+        let others = self.others
+        correlationTask?.cancel()
+        correlationTask = Task {
+            let rows = await Task.detached(priority: .userInitiated) {
+                Self.correlationRows(windowed: windowed, others: others)
+            }.value
+            guard !Task.isCancelled, correlationKey == key else { return }
+            correlationCache = rows
+        }
     }
 
     private var correlationCard: some View {
@@ -1010,7 +1043,15 @@ struct MetricDetailView: View {
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
-                if rows.isEmpty {
+                if !othersLoaded {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking your other metrics…")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                } else if rows.isEmpty {
                     Text("Nothing in the catalog moves clearly with \(metric.title.lowercased()) over this window. Widen the range to surface relationships.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -1028,6 +1069,8 @@ struct MetricDetailView: View {
                 }
             }
         }
+        // The other catalog series load here, once the card is on screen, not before the chart.
+        .task(id: loadTaskID) { await loadOthers() }
     }
 
     @ViewBuilder

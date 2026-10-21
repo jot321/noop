@@ -11,6 +11,27 @@ public struct HRBucket: Sendable, Equatable {
     public init(ts: Int, bpm: Double) { self.ts = ts; self.bpm = bpm }
 }
 
+/// Exact heart-rate extremes over a window: the lowest and highest single sample, the sample mean
+/// and the sample count. A chart drawn from bucket means can't show these (a 5-minute mean flattens
+/// a sprint's peak), so a footer that names Min / Max reads them here.
+public struct HRWindowStats: Sendable, Equatable {
+    public let min: Double
+    public let max: Double
+    public let mean: Double
+    public let count: Int
+    public init(min: Double, max: Double, mean: Double, count: Int) {
+        self.min = min; self.max = max; self.mean = mean; self.count = count
+    }
+
+    /// Several sources' stats folded into one: extremes across all, mean weighted by count.
+    public static func combined(_ parts: [HRWindowStats]) -> HRWindowStats? {
+        let total = parts.reduce(0) { $0 + $1.count }
+        guard total > 0, let lo = parts.map(\.min).min(), let hi = parts.map(\.max).max() else { return nil }
+        let mean = parts.reduce(0.0) { $0 + $1.mean * Double($1.count) } / Double(total)
+        return HRWindowStats(min: lo, max: hi, mean: mean, count: total)
+    }
+}
+
 extension WhoopStore {
     /// Shared decoder, JSONDecoder is stateless across decodes and was previously allocated once
     /// per event row. Battery events are dense (~every 8 min), so a multi-year read decodes
@@ -94,6 +115,32 @@ extension WhoopStore {
                                  deviceId, from, to,
                                  bucket])
                 .map { HRBucket(ts: $0["bucket"], bpm: $0["avgBpm"]) }
+        }
+    }
+
+    /// Exact min / max / mean bpm over `[from, to]` with the same measured-first PPG fallback as
+    /// `hrBuckets` (a measured second wins; a second with no measured row uses its PPG estimate). One
+    /// aggregate in SQLite, no rows materialised. nil when the window holds no heart rate. The Deep
+    /// Timeline footer reads Min / Max here: at day scale its line is bucket means, whose extremes
+    /// understate the real peak and trough (added 2026-10-21).
+    public func hrWindowStats(deviceId: String, from: Int, to: Int) async throws -> HRWindowStats? {
+        try syncRead { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT MIN(bpm) AS lo, MAX(bpm) AS hi, AVG(bpm) AS mean, COUNT(*) AS n FROM (
+                    SELECT ts, bpm FROM hrSample
+                    WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                    UNION ALL
+                    SELECT p.ts, p.bpm FROM ppgHrSample p
+                    WHERE p.deviceId = ? AND p.ts >= ? AND p.ts <= ?
+                      AND NOT EXISTS (
+                        SELECT 1 FROM hrSample h
+                        WHERE h.deviceId = p.deviceId AND h.ts = p.ts)
+                )
+                """, arguments: [deviceId, from, to, deviceId, from, to]) else { return nil }
+            let n: Int = row["n"]
+            guard n > 0, let lo: Double = row["lo"], let hi: Double = row["hi"],
+                  let mean: Double = row["mean"] else { return nil }
+            return HRWindowStats(min: lo, max: hi, mean: mean, count: n)
         }
     }
 
