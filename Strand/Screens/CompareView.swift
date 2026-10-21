@@ -196,12 +196,16 @@ struct CompareView: View {
 
     /// A full-history series' rows over a given range, taken RELATIVE TO THAT SERIES'
     /// LATEST data point (not "now"); `.all` returns everything. Compared as day keys: local
-    /// midnights are not 86 400 s apart across a DST change.
-    private func slice(_ full: [(day: String, value: Double)], _ r: CompareRange) -> [(day: String, value: Double)] {
-        guard let n = r.days else { return full }
+    /// midnights are not 86 400 s apart across a DST change. `today` is not used yet.
+    static func slice(_ full: [(day: String, value: Double)], days: Int?, today: String) -> [(day: String, value: Double)] {
+        guard let n = days else { return full }
         guard let lastDay = full.last?.day, DayWindow.dayNumber(lastDay) != nil else { return [] }
         let cutoff = DayWindow.windowStart(endingOn: lastDay, days: n)
         return full.filter { $0.day >= cutoff }
+    }
+
+    private func slice(_ full: [(day: String, value: Double)], _ r: CompareRange) -> [(day: String, value: Double)] {
+        Self.slice(full, days: r.days, today: Repository.localDayKey(Date()))
     }
 
     /// The range actually used for a series: the SELECTED range when its window holds
@@ -463,6 +467,18 @@ struct CompareView: View {
         correlationKey(series) == pairCacheKey ? pairCache : computePairResults(series)
     }
 
+    /// Fewest shared days before Compare reports r, the same floor Explore's "What correlates"
+    /// uses: from 3 or 4 points r swings to ±1 by chance, and Compare called that "very strong".
+    static let minSharedDays = 10
+
+    /// Pearson r over the days two series share, or nil with fewer than `minSharedDays`.
+    static func correlation(_ a: [(day: String, value: Double)],
+                            _ b: [(day: String, value: Double)]) -> (r: Double, n: Int)? {
+        let pairs = CorrelationEngine.alignByDay(a, b)
+        guard pairs.count >= minSharedDays, let c = CorrelationEngine.pearson(pairs) else { return nil }
+        return (c.r, c.n)
+    }
+
     /// The actual (expensive) pairwise scan. Pure — no view state read/written.
     private func computePairResults(_ series: [CompareSeries]) -> [PairResult] {
         var out: [PairResult] = []
@@ -470,8 +486,7 @@ struct CompareView: View {
         guard s.count >= 2 else { return out }
         for i in 0..<(s.count - 1) {
             for j in (i + 1)..<s.count {
-                let pairs = CorrelationEngine.alignByDay(s[i].rows, s[j].rows)
-                guard pairs.count >= 3, let c = CorrelationEngine.pearson(pairs) else { continue }
+                guard let c = Self.correlation(s[i].rows, s[j].rows) else { continue }
                 out.append(PairResult(
                     id: "\(s[i].id)~\(s[j].id)",
                     a: s[i], b: s[j], r: c.r, n: c.n
@@ -503,7 +518,7 @@ struct CompareView: View {
 
             if pairs.isEmpty {
                 NoopCard {
-                    Text("Not enough overlapping days between these metrics in \(range.phrase). Widen the range.")
+                    Text("Too few shared days in \(range.phrase) to compare these metrics. r needs \(Self.minSharedDays). Widen the range.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
