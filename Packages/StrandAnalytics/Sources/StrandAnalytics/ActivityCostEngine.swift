@@ -36,7 +36,10 @@ import Foundation
 //
 // Confidence (reuses ScoreConfidence): a sport with fewer than minSessions tagged
 // next-morning pairs is OMITTED entirely (too thin to say anything honest);
-// minSessions…<solidSessions → .building; ≥ solidSessions → .solid.
+// minSessions…<solidSessions → .building; ≥ solidSessions → .solid. The baseline has its
+// own floor: fewer than minRestDays untouched days → nothing is reported (one rest day
+// made every cost a comparison against a single morning), and .solid also needs
+// solidRestDays of them. (Audit I8, 2026-10-21.)
 //
 // Ranking: biggest |delta| first (the sports that move you most), .solid ahead of
 // .building on a tie, then sport name ascending — a fully deterministic, stable order.
@@ -106,6 +109,10 @@ public enum ActivityCostEngine {
     public static let minSessions: Int = 4
     /// Pairs at/above which a sport's confidence is `.solid` (else `.building`).
     public static let solidSessions: Int = 8
+    /// Untouched rest days below which there is no honest baseline, so nothing is reported.
+    public static let minRestDays: Int = 7
+    /// Rest days at/above which the baseline is firm enough for a `.solid` result.
+    public static let solidRestDays: Int = 14
     /// How many days forward the bounce-back trajectory is probed (D+1 … D+maxLookahead).
     public static let maxLookahead: Int = 7
     /// Charge points within the baseline that count as "recovered" for daysToBaseline.
@@ -145,8 +152,9 @@ public enum ActivityCostEngine {
         for (day, value) in recoveryByDay where !affected.contains(day) {
             restValues.append(value)
         }
-        // No untouched days → no baseline to measure against → nothing honest to say.
-        guard !restValues.isEmpty else { return [] }
+        // Too few untouched days → no baseline worth measuring against → nothing honest to say.
+        guard restValues.count >= minRestDays else { return [] }
+        let baselineFirm = restValues.count >= solidRestDays
         let baselineMean = mean(restValues)
 
         var results: [ActivityCost] = []
@@ -171,7 +179,7 @@ public enum ActivityCostEngine {
             let daysToBaseline = forwardDaysToBaseline(taggedDays: taggedDays,
                                                        recoveryByDay: recoveryByDay,
                                                        baselineMean: baselineMean)
-            let confidence: ScoreConfidence = n >= solidSessions ? .solid : .building
+            let confidence: ScoreConfidence = n >= solidSessions && baselineFirm ? .solid : .building
 
             results.append(ActivityCost(sport: sport, delta: delta,
                                         meanNextMorning: meanNextMorning,
