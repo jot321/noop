@@ -123,10 +123,15 @@ public struct OverviewHRChart: View {
         // into sub-windows stays crisp. The default-binding case here is `zoomBounds == nil`, so the
         // static Today chart downsamples. `zoomBounds` is the stable discriminator (set once, never
         // toggles) — unlike the live `zoomDomain`, which is nil until the user first zooms.
-        self.displayPoints = (zoomBounds != nil)
+        let display = (zoomBounds != nil)
             ? sorted
             : ChartDownsample.minMaxBucketed(sorted, threshold: ChartDownsample.markThreshold,
                                              targetCount: ChartDownsample.targetVertices)
+        // Same gap rule as TrendChart (3x the median spacing): the line and its area break over a
+        // stretch with no heart rate, e.g. 11 hours off-wrist, instead of bridging it.
+        let drawn = TrendChart.tagRuns(display, breaks: TrendChart.gapBreaks(sorted))
+        self.drawn = drawn
+        self.lonePoints = TrendChart.lonePoints(drawn)
     }
 
     @State private var hoverX: CGFloat? = nil
@@ -144,8 +149,11 @@ public struct OverviewHRChart: View {
     /// full resolution in the Deep Timeline (where the user pinches into sub-windows), else
     /// min/max-per-bucket down to ~the plot pixel width. Min/max bucketing keeps every visible spike, so
     /// the static Today chart is pixel-identical. Computed ONCE in `init` (not per body/hover eval) so
-    /// it's memoized on `points`; hover / markers / accessibility stay on the full `points`.
-    private let displayPoints: [TrendPoint]
+    /// it's memoized on `points`; hover / markers / accessibility stay on the full `points`. Each point
+    /// carries its unbroken run (one Swift Charts series per run) so the line breaks over HR gaps.
+    let drawn: [TrendChart.Drawn]
+    /// Points alone in their run, drawn as dots since a one-point line is invisible.
+    private let lonePoints: [TrendPoint]
 
     /// Smallest zoom window we allow (1 minute) — past this the line is just two points and pinch jitters.
     public static let minZoomSpan: TimeInterval = 60
@@ -280,8 +288,10 @@ public struct OverviewHRChart: View {
             .foregroundStyle(StrandPalette.sleepDeep.opacity(0.32))
         }
 
-        ForEach(displayPoints) { p in
-            AreaMark(x: .value("Time", p.date), y: .value("BPM", p.value))
+        ForEach(drawn) { d in
+            // Explicit floor (not y from 0) so each run's area is its own shape, like TrendChart's.
+            AreaMark(x: .value("Time", d.point.date), yStart: .value("Floor", valueRange.lowerBound),
+                     yEnd: .value("BPM", d.point.value), series: .value("Run", d.run))
                 .interpolationMethod(.monotone)
                 .foregroundStyle(
                     LinearGradient(
@@ -293,10 +303,16 @@ public struct OverviewHRChart: View {
                     )
                 )
         }
-        ForEach(displayPoints) { p in
-            LineMark(x: .value("Time", p.date), y: .value("BPM", p.value))
+        ForEach(drawn) { d in
+            LineMark(x: .value("Time", d.point.date), y: .value("BPM", d.point.value),
+                     series: .value("Run", d.run))
                 .interpolationMethod(.monotone)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                .foregroundStyle(valueGradient)
+        }
+        ForEach(lonePoints) { p in
+            PointMark(x: .value("Time", p.date), y: .value("BPM", p.value))
+                .symbolSize(22)
                 .foregroundStyle(valueGradient)
         }
 

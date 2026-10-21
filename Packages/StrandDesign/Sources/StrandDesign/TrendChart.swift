@@ -116,17 +116,9 @@ public struct TrendChart: View {
 
         let display = ChartDownsample.minMaxBucketed(sorted, threshold: ChartDownsample.markThreshold,
                                                      targetCount: ChartDownsample.targetVertices)
-        let breaks = Self.gapBreaks(sorted)
-        var drawn: [Drawn] = []
-        drawn.reserveCapacity(display.count)
-        var b = 0
-        for p in display {
-            while b < breaks.count && breaks[b] < p.date { b += 1 }
-            drawn.append(Drawn(point: p, run: b))
-        }
+        let drawn = Self.tagRuns(display, breaks: Self.gapBreaks(sorted))
         self.drawn = drawn
-        let runSizes = Dictionary(grouping: drawn, by: \.run).mapValues(\.count)
-        self.lonePoints = drawn.filter { runSizes[$0.run] == 1 }.map(\.point)
+        self.lonePoints = Self.lonePoints(drawn)
 
         if sorted.isEmpty {
             self.a11ySummary = String(localized: "No data", bundle: .module)
@@ -176,6 +168,25 @@ public struct TrendChart: View {
         let shown = v * scale
         let rounded = shown.rounded()
         return abs(shown - rounded) < 1e-6 ? String(Int(rounded)) : String(format: "%.1f", shown)
+    }
+
+    /// Tag each (sorted) display point with the unbroken run it belongs to: run n lies between the
+    /// n-th and (n+1)-th break. Shared with OverviewHRChart so both break their lines the same way.
+    static func tagRuns(_ display: [TrendPoint], breaks: [Date]) -> [Drawn] {
+        var drawn: [Drawn] = []
+        drawn.reserveCapacity(display.count)
+        var b = 0
+        for p in display {
+            while b < breaks.count && breaks[b] < p.date { b += 1 }
+            drawn.append(Drawn(point: p, run: b))
+        }
+        return drawn
+    }
+
+    /// Points alone in their run: a one-point line is invisible, so they draw as dots.
+    static func lonePoints(_ drawn: [Drawn]) -> [TrendPoint] {
+        let runSizes = Dictionary(grouping: drawn, by: \.run).mapValues(\.count)
+        return drawn.filter { runSizes[$0.run] == 1 }.map(\.point)
     }
 
     /// The selected point while scrubbing (pointer hover or press-and-drag).
