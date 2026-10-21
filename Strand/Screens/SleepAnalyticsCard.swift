@@ -17,12 +17,15 @@ import StrandDesign
 struct SleepAnalyticsCard: View {
     @EnvironmentObject var repo: Repository
 
-    /// Full per-key history (oldest→newest), loaded once. Empty keys are dropped.
+    /// Full per-key history (oldest→newest), reloaded on each data refresh. Empty keys are dropped.
     @State private var history: [String: [(day: String, value: Double)]] = [:]
     @State private var apneaBand: String?
     @State private var selectedKey: String?
     @State private var range: ExploreRange = .month
     @State private var loaded = false
+    /// The `refreshSeq` the history was read at, so scrolling the card back into the lazy stack doesn't
+    /// re-read unchanged data.
+    @State private var loadedSeq: Int?
 
     /// The COMPUTED source: IntelligenceEngine writes these keys under "my-whoop-noop", which
     /// `exploreSeries` reaches via its computed layer (plain `series(source:"my-whoop")` never does).
@@ -51,7 +54,9 @@ struct SleepAnalyticsCard: View {
                 }
             }
         }
-        .task { await load() }
+        // Re-read on every data refresh: a plain `.task` loaded once, so a night analysed after the
+        // card appeared never showed up.
+        .task(id: repo.refreshSeq) { await load() }
     }
 
     private var header: some View {
@@ -254,8 +259,8 @@ struct SleepAnalyticsCard: View {
     // MARK: - Load
 
     private func load() async {
-        guard !loaded else { return }
-        loaded = true
+        let seq = repo.refreshSeq
+        guard loadedSeq != seq else { return }
         var loadedHistory: [String: [(day: String, value: Double)]] = [:]
         for m in Self.catalogue {
             // fullHistory so the trend can span every recorded night (the range control then windows it).
@@ -265,8 +270,12 @@ struct SleepAnalyticsCard: View {
             }
         }
         history = loadedHistory
-        if let ahi = loadedHistory["ahi_est"]?.last?.value { apneaBand = ApneaBand.classify(ahi) }
-        selectedKey = visibleMetrics.first?.key
+        apneaBand = loadedHistory["ahi_est"]?.last.map { ApneaBand.classify($0.value) }
+        // Keep the user's chosen row across a refresh while it still has data.
+        if selectedKey.map({ loadedHistory[$0] == nil }) ?? true { selectedKey = visibleMetrics.first?.key }
+        // Only now: set before the reads, the card said "No overnight analytics yet" while loading.
+        loaded = true
+        loadedSeq = seq
     }
 }
 
