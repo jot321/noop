@@ -26,8 +26,8 @@ final class ActivityCostEngineTests: XCTestCase {
             tagged.insert(day)
             rec[day] = 50            // each active day's own Charge (excluded from baseline)
         }
-        // A block of genuinely untouched rest days, all at 70.
-        for d in 20...27 { rec[String(format: "2026-06-%02d", d)] = 70 }
+        // A block of genuinely untouched rest days (14, enough for .solid), all at 70.
+        for d in 17...30 { rec[String(format: "2026-06-%02d", d)] = 70 }
 
         let out = ActivityCostEngine.evaluate(activityDaysBySport: ["running": tagged],
                                               recoveryByDay: rec)
@@ -51,7 +51,7 @@ final class ActivityCostEngineTests: XCTestCase {
             tagged.insert(day)
             rec[day] = 80
         }
-        for d in 20...25 { rec[String(format: "2026-07-%02d", d)] = 60 }  // baseline 60
+        for d in 20...26 { rec[String(format: "2026-07-%02d", d)] = 60 }  // baseline 60 (7 rest days)
 
         let out = ActivityCostEngine.evaluate(activityDaysBySport: ["yoga": tagged],
                                               recoveryByDay: rec)
@@ -76,7 +76,7 @@ final class ActivityCostEngineTests: XCTestCase {
                 rec[String(format: "2026-08-%02d", d + 1)] = 55
             }
         }
-        for d in 20...25 { rec[String(format: "2026-08-%02d", d)] = 65 }
+        for d in 20...26 { rec[String(format: "2026-08-%02d", d)] = 65 }
 
         let out = ActivityCostEngine.evaluate(activityDaysBySport: ["swim": tagged],
                                               recoveryByDay: rec)
@@ -160,8 +160,8 @@ final class ActivityCostEngineTests: XCTestCase {
         run(&rec, &mid, month: 2, startDay: 1, length: 6, value: 50)
         var big: Set<String> = []    // length 9 → n=8 → .solid
         run(&rec, &big, month: 3, startDay: 1, length: 9, value: 50)
-        // A genuinely untouched baseline block (different month, never tagged).
-        for i in 1...8 { rec[String(format: "2028-06-%02d", i)] = 70 }
+        // A genuinely untouched baseline block (different month, never tagged), 14 days for .solid.
+        for i in 1...14 { rec[String(format: "2028-06-%02d", i)] = 70 }
 
         let out = ActivityCostEngine.evaluate(
             activityDaysBySport: ["thin": thin, "mid": mid, "big": big],
@@ -190,7 +190,7 @@ final class ActivityCostEngineTests: XCTestCase {
         run(&rec, &bravo, month: 2, startDay: 1, length: 6, value: 50)   // n=5, delta 20
         var charlie: Set<String> = []
         run(&rec, &charlie, month: 3, startDay: 1, length: 6, value: 60) // n=5, delta 10
-        for i in 1...8 { rec[String(format: "2028-06-%02d", i)] = 70 }   // baseline 70
+        for i in 1...14 { rec[String(format: "2028-06-%02d", i)] = 70 }  // baseline 70
 
         let out = ActivityCostEngine.evaluate(
             activityDaysBySport: ["alpha": alpha, "bravo": bravo, "charlie": charlie],
@@ -264,5 +264,28 @@ final class ActivityCostEngineTests: XCTestCase {
     func testMean() {
         XCTAssertEqual(ActivityCostEngine.mean([2, 4, 6]), 4, accuracy: 1e-9)
         XCTAssertEqual(ActivityCostEngine.mean([]), 0, accuracy: 1e-9)
+    }
+
+    // MARK: - Rest-day floor (audit I8, 2026-10-21)
+
+    /// One untouched day is not a baseline: every cost would be measured against a single morning.
+    func testASingleRestDayIsNotABaseline() {
+        var rec: [String: Double] = [:]
+        var tagged: Set<String> = []
+        run(&rec, &tagged, month: 3, startDay: 1, length: 9, value: 50)   // n = 8
+        rec["2028-06-01"] = 90                                            // the only rest day
+        let out = ActivityCostEngine.evaluate(activityDaysBySport: ["run": tagged], recoveryByDay: rec)
+        XCTAssertTrue(out.isEmpty)
+    }
+
+    /// Enough sessions but a thin baseline (7 to 13 rest days) reads `.building`, not `.solid`.
+    func testThinBaselineCapsConfidenceAtBuilding() {
+        var rec: [String: Double] = [:]
+        var tagged: Set<String> = []
+        run(&rec, &tagged, month: 3, startDay: 1, length: 9, value: 50)   // n = 8
+        for i in 1...8 { rec[String(format: "2028-06-%02d", i)] = 70 }
+        let r = cost(ActivityCostEngine.evaluate(activityDaysBySport: ["run": tagged], recoveryByDay: rec), "run")
+        XCTAssertEqual(r?.n, 8)
+        XCTAssertEqual(r?.confidence, .building)
     }
 }

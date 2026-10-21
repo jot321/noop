@@ -69,10 +69,7 @@ struct ExcludedDaysView: View {
         guard edit() else { return }
         let after = ExcludedDays.current()
         days = after.sorted(by: >)
-        let touched = before.symmetricDifference(after)
-        let oldest = touched.min().flatMap(IntelligenceEngine.epochDayIndex) ?? 0
-        let todayIdx = Int(Date().timeIntervalSince1970 + Double(TimeZone.current.secondsFromGMT())) / 86_400
-        let span = min(4000, max(21, todayIdx - oldest + 2))
+        let span = ExcludedDays.rescoreSpan(touched: before.symmetricDifference(after))
         rescoring = true
         Task {
             await model.intelligence.analyzeRecent(maxDays: span)

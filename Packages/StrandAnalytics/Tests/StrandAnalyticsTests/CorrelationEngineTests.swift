@@ -35,13 +35,13 @@ final class CorrelationEngineTests: XCTestCase {
 
     func testPearsonGoldenValues() {
         // x=[1..5], y=[2,4,5,4,5] → r=0.7745966692, slope 0.6, intercept 2.2,
-        // pApprox (A&S-erf normal approx) ≈ 0.0338947336.
+        // pApprox (Student-t, 3 df) ≈ 0.1240270627; the old normal tail said 0.034 (audit I10).
         let xy: [(Double, Double)] = [(1, 2), (2, 4), (3, 5), (4, 4), (5, 5)]
         let c = CorrelationEngine.pearson(xy)!
         XCTAssertEqual(c.r, 0.7745966692414834, accuracy: 1e-9)
         XCTAssertEqual(c.slope, 0.6, accuracy: 1e-9)
         XCTAssertEqual(c.intercept, 2.2, accuracy: 1e-9)
-        XCTAssertEqual(c.pApprox, 0.033894733597028104, accuracy: 1e-6)
+        XCTAssertEqual(c.pApprox, 0.12402706265755456, accuracy: 1e-6)
     }
 
     func testPearsonTooFewReturnsNil() {
@@ -137,5 +137,36 @@ final class CorrelationEngineTests: XCTestCase {
         XCTAssertEqual(CorrelationEngine.shiftDay("2026-03-01", by: -1), "2026-02-28")
         XCTAssertEqual(CorrelationEngine.shiftDay("2025-12-31", by: 1), "2026-01-01")
         XCTAssertEqual(CorrelationEngine.shiftDay("2024-02-28", by: 1), "2024-02-29") // leap year
+    }
+
+    // MARK: - Small-sample honesty (audit I10, 2026-10-21)
+
+    /// Five pairs at r ≈ 0.77 are not significant: the Student-t tail with 3 degrees of freedom gives
+    /// p ≈ 0.12. The normal tail said 0.034, so the Insights card read "p < 0.05" on five days of data.
+    func testSmallSampleIsNotSignificant() {
+        let c = CorrelationEngine.pearson([(1, 2), (2, 4), (3, 5), (4, 4), (5, 5)])!
+        XCTAssertGreaterThan(c.pApprox, 0.05)
+    }
+
+    /// The tail matches reference Student-t values (scipy.stats.t.sf × 2).
+    func testStudentTTailMatchesReferenceValues() {
+        XCTAssertEqual(CorrelationEngine.studentTTwoSided(t: 2.0, df: 8), 0.08051623795726257, accuracy: 1e-9)
+        XCTAssertEqual(CorrelationEngine.studentTTwoSided(t: 1.0, df: 1), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(CorrelationEngine.studentTTwoSided(t: -3.5, df: 30), 0.0014768074376442554, accuracy: 1e-9)
+        XCTAssertEqual(CorrelationEngine.studentTTwoSided(t: 0, df: 12), 1.0, accuracy: 1e-12)
+    }
+
+    /// `significant` needs both p < 0.05 and at least 10 pairs.
+    func testSignificanceNeedsTenPairs() {
+        func pairs(_ n: Int) -> [(Double, Double)] {
+            (1...n).map { i -> (Double, Double) in
+                let x = Double(i)
+                return (x, i % 2 == 0 ? x + 0.3 : x - 0.3)
+            }
+        }
+        let c9 = CorrelationEngine.pearson(pairs(9))!
+        XCTAssertLessThan(c9.pApprox, 0.05)
+        XCTAssertFalse(c9.significant, "nine days can't carry a p < 0.05 label")
+        XCTAssertTrue(CorrelationEngine.pearson(pairs(12))!.significant)
     }
 }

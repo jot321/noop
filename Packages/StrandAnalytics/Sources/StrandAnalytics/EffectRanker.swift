@@ -4,7 +4,9 @@ import Foundation
 //
 // Pure, deterministic, DB-free. Generalises ActivityCostEngine's single-sport D+1 to
 // EVERY logged journal behaviour against EVERY daily outcome, and searches a small fixed
-// lag set so it can tell "same day" from "shows up the next morning."
+// lag set so it can tell "shows up the next morning" from "a day later". Journal days are
+// keyed to the WAKE day (an answer describes the evening before that morning), so lag 0 is
+// already the next morning. (Audit I5, 2026-10-21: lag 0 used to read "same day".)
 //
 // For each (behaviour b, outcome o, lag L ∈ {0, +1, +2}):
 //   1. behaviourDays = the day keys b was logged on (dose ≥ 1; callers pass the set).
@@ -40,8 +42,8 @@ public struct RankedEffect: Equatable, Sendable {
     public let behavior: String
     /// The outcome metric label (e.g. "Charge").
     public let outcome: String
-    /// The lag (in days) at which the strongest honest effect was found: 0 = same day,
-    /// +1 = the next morning, +2 = two mornings later.
+    /// The lag (in days) at which the strongest honest effect was found. Behaviour days are wake-day
+    /// keys, so 0 = the next morning after the behaviour, +1 = a day later, +2 = two days later.
     public let lag: Int
     /// The measured effect at `lag` (means, delta, Cohen's d, Welch p, significant).
     public let effect: BehaviorEffect
@@ -57,12 +59,12 @@ public struct RankedEffect: Equatable, Sendable {
         self.confidence = confidence
     }
 
-    /// Plain-English lead/lag chip text, e.g. "same day" / "next morning" / "2 mornings later".
+    /// Plain-English lead/lag chip text: "next morning" / "a day later" / "2 days later".
     public var leadLagText: String {
         switch lag {
-        case 0: return "same day"
-        case 1: return "next morning"
-        default: return "\(lag) mornings later"
+        case 0: return "next morning"
+        case 1: return "a day later"
+        default: return "\(lag) days later"
         }
     }
 

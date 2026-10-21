@@ -364,23 +364,17 @@ struct InsightsView: View {
         let nativeAnswers = await repo.nativeJournalAnswers(day: selectedDayKey)
         let nativeNumeric = await repo.nativeJournalNumeric(day: selectedDayKey)
 
-        // Daily metrics for the strap-only outcome fallback (merged, imported-wins). The view is
+        // Merged daily metrics (imported-wins) for the Activity Cost recovery side. The view is
         // MainActor-isolated, so reading the published cache here is on the right actor.
         let mergedDays = repo.days
 
-        // Outcome series (Whoop) → both [day:value] dictionaries and ordered series. The imported
-        // metricSeries only exists after a CSV import; fill the days it doesn't cover from the
-        // merged daily metrics so an account-free user's logging still gets effects
-        // (recovery/hrv/rhr have daily columns; sleep_performance stays import-only).
+        // Outcome series → both [day:value] dictionaries and ordered series.
         var byKey: [String: [String: Double]] = [:]
         var seriesMap: [String: [(day: String, value: Double)]] = [:]
         for key in outcomeKeys {
-            let s = await repo.series(key: key, source: "my-whoop")
-            var dict: [String: Double] = [:]
-            for row in s { dict[row.day] = row.value }
-            for d in mergedDays where dict[d.day] == nil {
-                if let v = Self.dailyOutcome(key: key, day: d) { dict[d.day] = v }
-            }
+            // Imported series, then the computed ("-noop") series, then the daily column: a strap-only
+            // user's Rest lives only in the computed series (audit I6).
+            let dict = await repo.insightsOutcome(key: key)
             byKey[key] = dict
             seriesMap[key] = dict.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
         }
@@ -454,18 +448,6 @@ struct InsightsView: View {
         loaded = true
         recomputeRanked()
         recomputeRelationships()
-    }
-
-    /// The merged DailyMetric column backing an outcome key, for days the imported metricSeries
-    /// doesn't cover (strap-only users). sleep_performance has no daily column, so it stays
-    /// import-only, never seeded here.
-    private static func dailyOutcome(key: String, day d: DailyMetric) -> Double? {
-        switch key {
-        case "recovery": return d.recovery
-        case "hrv":      return d.avgHrv
-        case "rhr":      return d.restingHr.map(Double.init)
-        default:         return nil
-        }
     }
 
     // MARK: - Activity Cost input shaping (#439)
@@ -1224,27 +1206,32 @@ struct InsightsView: View {
 
     private func computeRelationships() -> [Relationship] {
         func series(_ key: String) -> [(day: String, value: Double)] { seriesByKey[key] ?? [] }
+        // A relationship card needs about ten paired days: on three or four, r swings on one night and the
+        // card claimed "p < 0.05" from a normal tail that understates small-sample p. (Audit I10.)
+        func enough(_ c: Correlation?) -> Correlation? {
+            c.flatMap { $0.n >= CorrelationEngine.minPairsForSignificance ? $0 : nil }
+        }
         var out: [Relationship] = []
 
         // Sleep performance ↔ recovery (same day).
-        if let c = CorrelationEngine.pearson(
-            CorrelationEngine.alignByDay(series("sleep_performance"), series("recovery"))) {
+        if let c = enough(CorrelationEngine.pearson(
+            CorrelationEngine.alignByDay(series("sleep_performance"), series("recovery")))) {
             out.append(.init(id: "sleep-rec",
                              title: String(localized: "Rest ↔ Charge"),
                              blurb: String(localized: "How closely a good night tracks next-morning charge."),
                              corr: c))
         }
         // HRV ↔ recovery (same day).
-        if let c = CorrelationEngine.pearson(
-            CorrelationEngine.alignByDay(series("hrv"), series("recovery"))) {
+        if let c = enough(CorrelationEngine.pearson(
+            CorrelationEngine.alignByDay(series("hrv"), series("recovery")))) {
             out.append(.init(id: "hrv-rec",
                              title: String(localized: "HRV ↔ Charge"),
                              blurb: String(localized: "Heart-rate variability as the engine behind your charge score."),
                              corr: c))
         }
         // Resting HR ↔ recovery (same day), expected to be negative.
-        if let c = CorrelationEngine.pearson(
-            CorrelationEngine.alignByDay(series("rhr"), series("recovery"))) {
+        if let c = enough(CorrelationEngine.pearson(
+            CorrelationEngine.alignByDay(series("rhr"), series("recovery")))) {
             out.append(.init(id: "rhr-rec",
                              title: String(localized: "Resting HR ↔ Charge"),
                              blurb: String(localized: "A lower resting heart rate usually means a higher charge."),
@@ -1253,7 +1240,7 @@ struct InsightsView: View {
         // Today's recovery ↔ NEXT-day recovery (1-day lag) as a strain/carry-over proxy.
         // (Strain series isn't in the outcome set; recovery→next-day recovery shows
         //  how much yesterday carries into today.)
-        if let c = CorrelationEngine.lagged(x: series("recovery"), y: series("recovery"), lagDays: 1) {
+        if let c = enough(CorrelationEngine.lagged(x: series("recovery"), y: series("recovery"), lagDays: 1)) {
             out.append(.init(id: "rec-lag",
                              title: String(localized: "Charge → Next-day charge"),
                              blurb: String(localized: "How much one day's charge carries into the next."),
@@ -1284,8 +1271,8 @@ struct InsightsView: View {
                 Text(String(format: "r = %+.2f", r))
                     .font(StrandFont.number(16))
                     .foregroundStyle(strength)
-                StatePill(rel.corr.pApprox < 0.05 ? "p < 0.05" : "n.s.",
-                          tone: rel.corr.pApprox < 0.05 ? .accent : .neutral,
+                StatePill(rel.corr.significant ? "p < 0.05" : "n.s.",
+                          tone: rel.corr.significant ? .accent : .neutral,
                           showsDot: false)
             }
 

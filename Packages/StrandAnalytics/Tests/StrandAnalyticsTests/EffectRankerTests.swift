@@ -42,7 +42,7 @@ final class EffectRankerTests: XCTestCase {
         let r = row(out, "Alcohol")
         XCTAssertNotNil(r)
         XCTAssertEqual(r!.lag, 1)                       // the planted lag
-        XCTAssertEqual(r!.leadLagText, "next morning")
+        XCTAssertEqual(r!.leadLagText, "a day later")    // wake-day keys: D+1 is the second morning
         XCTAssertLessThan(r!.effect.cohensD, 0)         // next-morning outcome is LOWER
         XCTAssertTrue(r!.effect.significant)
         // The next-morning group really is ≈50 vs a ≈70 baseline (means carry the jitter).
@@ -147,6 +147,24 @@ final class EffectRankerTests: XCTestCase {
                                cohensD: -2.0, pApprox: 0.001, significant: true)
         let r = RankedEffect(behavior: "Alcohol", outcome: "Charge", lag: 1,
                              effect: e, confidence: .building)
-        XCTAssertTrue(r.sentence().hasSuffix("(next morning)."))
+        XCTAssertTrue(r.sentence().hasSuffix("(a day later)."))
+    }
+
+    // MARK: - Lag labels for wake-day keyed journal days (audit I5, 2026-10-21)
+
+    /// Journal answers are keyed to the morning they lead into, so lag 0 (the outcome on the same key)
+    /// IS the next morning after the behaviour, and lag 1 is a day after that.
+    func testLagLabelsFollowWakeDayKeys() {
+        let e = BehaviorEffect(behavior: "Alcohol", outcome: "Charge",
+                               meanWith: 50, meanWithout: 70, delta: -20,
+                               pctChange: -100.0 * 20.0 / 70.0, nWith: 6, nWithout: 8,
+                               cohensD: -2.0, pApprox: 0.001, significant: true)
+        func label(_ lag: Int) -> String {
+            RankedEffect(behavior: "Alcohol", outcome: "Charge", lag: lag, effect: e, confidence: .building)
+                .leadLagText
+        }
+        XCTAssertEqual(label(0), "next morning")
+        XCTAssertEqual(label(1), "a day later")
+        XCTAssertEqual(label(2), "2 days later")
     }
 }

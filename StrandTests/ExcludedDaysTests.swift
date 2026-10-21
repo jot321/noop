@@ -1,5 +1,6 @@
 import XCTest
 import WhoopStore
+import StrandAnalytics
 @testable import Strand
 
 /// Days the user excluded ("not me"): the stored list, the `--exclude-days` launch argument, and which
@@ -41,6 +42,16 @@ final class ExcludedDaysTests: XCTestCase {
         XCTAssertTrue(ExcludedDays.remove("2026-08-02", defaults))
         XCTAssertFalse(ExcludedDays.remove("2026-08-02", defaults))
         XCTAssertEqual(ExcludedDays.current(defaults), ["2026-08-03"])
+    }
+
+    /// The rescore after a list change reaches the oldest touched day; the launch path uses the same
+    /// span, so a launch exclusion months back is not rescored at the default 21 days. (Audit I2.)
+    func testRescoreSpanReachesTheOldestTouchedDay() {
+        let today = Baselines.dayIndex("2026-06-30")!
+        XCTAssertEqual(ExcludedDays.rescoreSpan(touched: ["2026-06-28"], todayIdx: today), 21)
+        XCTAssertEqual(ExcludedDays.rescoreSpan(touched: ["2026-01-01", "2026-06-01"], todayIdx: today), 182)
+        XCTAssertEqual(ExcludedDays.rescoreSpan(touched: ["2010-01-01"], todayIdx: today), 4000)
+        XCTAssertEqual(ExcludedDays.rescoreSpan(touched: [], todayIdx: today), 21)
     }
 
     func testDetectedSessionsEndingOnAnExcludedDayAreRemovedEditedOnesStay() {

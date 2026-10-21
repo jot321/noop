@@ -32,12 +32,21 @@ final class IntelligenceEngine: ObservableObject {
     /// dropped, so a freshly-synced night intermittently never gets re-scored until the next cycle and Today
     /// falls back to the last scored day. Instead the dropped force sets this flag; the in-flight pass's
     /// `defer` re-invokes `analyzeRecent(force: true)` ONCE when it clears. A single re-arm (the flag is
-    /// cleared BEFORE the re-invoke) bounds it to one extra pass , no recompute storm.
-    private var pendingForcedRescore = false
+    /// cleared BEFORE the re-invoke) bounds it to one extra pass , no recompute storm. Holds the WIDEST
+    /// `maxDays` asked for while the pass ran (nil = nothing pending): a dropped "Bring back" for a day
+    /// 400 days ago must re-run at 400, not at the in-flight pass's 21, or that day is never rescored.
+    /// (Audit I2, 2026-10-21.)
+    private var pendingForcedRescoreDays: Int?
     /// #899 heal bound: true while the last heal already re-armed a rescore, so a heal firing again on
     /// the very next pass cannot re-arm a second time (the Android twin is hard-bounded to exactly one
     /// re-pass; this mirrors it). Reset by any pass whose heal finds nothing, restoring the budget.
     private var healRearmedThisCycle = false
+    /// The `maxDays` of every pass that took the lock, oldest first, and the most passes ever inside the
+    /// body at once. Cheap bookkeeping that lets tests prove a re-armed rescore runs at the dropped
+    /// request's width (audit I2) and that two calls never interleave their writes (audit I3).
+    private(set) var passWidths: [Int] = []
+    private(set) var peakConcurrentPasses = 0
+    private var activePasses = 0
 
     /// Who supplies the dashboard headline for a By-Day row. The By-Day card always shows NOOP's OWN
     /// on-device numbers, but the WHOLE-DASHBOARD value for the same day can come from an IMPORTED row
@@ -137,7 +146,41 @@ final class IntelligenceEngine: ObservableObject {
         /// (`RecoveryScorer.skinTempRelative`), or nil when no deviation is available. Surfaced as
         /// "+0.3 C vs your normal" with a relative tier tag; never a fake clinical absolute.
         var skinTempRel: SkinTempRelative? = nil
+        /// True for a day read back from a stored row (an earlier pass scored it), which carries the
+        /// numbers but not the drivers or the confidence tier, so the By-Day card hides those.
+        var fromHistory: Bool = false
+        /// The night had HRV but no Charge because the HRV baseline went stale over a long gap off the
+        /// wrist (audit I4): the card says it is re-learning rather than showing a bare dash.
+        var relearning: Bool = false
         var id: String { day }
+    }
+
+    /// The By-Day list for any range: this pass's rows (with drivers and confidence) plus every stored
+    /// day an earlier pass scored, newest first. `results` holds only the last pass's window, so ALL, 1Y,
+    /// 6M and 3M all showed the same couple of days. Stored days are the computed ("-noop") rows and the
+    /// watch-only Apple Health days that carry a Charge, with the same provenance badge the pass gives
+    /// them. Pure. (Audit I7, 2026-10-21.)
+    nonisolated static func byDayRows(results: [Computed], stored: [SourcedDailyMetric]) -> [Computed] {
+        let whoopDays = Set(stored.filter { $0.source == .whoopImport }.map(\.metric.day))
+        let appleDays = Set(stored.filter { $0.source == .appleHealth }.map(\.metric.day))
+        let computedDays = Set(stored.filter { $0.source == .noopComputed }.map(\.metric.day))
+        var byDay: [String: Computed] = [:]
+        for row in stored {
+            let m = row.metric
+            let source: DaySource
+            switch row.source {
+            case .noopComputed:
+                source = DaySource.classify(day: m.day, importedWhoopDays: whoopDays, appleHealthDays: appleDays)
+            case .appleHealth where m.recovery != nil && !computedDays.contains(m.day) && !whoopDays.contains(m.day):
+                source = .appleHealth
+            default:
+                continue
+            }
+            byDay[m.day] = Computed(day: m.day, recovery: m.recovery, strain: m.strain, sleepMin: m.totalSleepMin,
+                                    hrv: m.avgHrv, rhr: m.restingHr, source: source, fromHistory: true)
+        }
+        for r in results { byDay[r.day] = r }
+        return byDay.values.sorted { $0.day > $1.day }
     }
 
     /// Optional sink for the per-day scoring diagnostic, fed line-by-line into the SAME shareable strap
@@ -378,7 +421,30 @@ final class IntelligenceEngine: ObservableObject {
         // in-flight pass already covers the same window). But a FORCED call is a real update path (a
         // post-backfill rescore after a sync) , dropping it would leave a freshly-synced night unscored
         // until the next cycle. Re-arm instead: flag it so the running pass's `defer` re-invokes once.
-        guard !computing else { if force { pendingForcedRescore = true }; return }
+        guard !computing else {
+            if force { pendingForcedRescoreDays = Self.rearmDays(pending: pendingForcedRescoreDays, requested: maxDays) }
+            return
+        }
+        // Take the lock BEFORE the first await (audit I3, 2026-10-21). It used to be set only after the
+        // store-handle and fingerprint awaits, so a second call arriving in between also passed the guard
+        // and the two passes interleaved their upserts and window deletes. The `defer` clears it on every
+        // return below, the early ones included.
+        computing = true
+        activePasses += 1
+        peakConcurrentPasses = max(peakConcurrentPasses, activePasses)
+        // #899-A re-arm: clear the lock, then if a forced rescore was dropped while this pass held it,
+        // run it ONCE. The flag is cleared BEFORE the re-invoke (a single re-arm), so a forced call landing
+        // DURING the re-invoke re-arms it again but a quiet one does not , this can never recurse unbounded.
+        // The re-invoke is launched on a fresh `Task` because `defer` is synchronous; by the time it runs
+        // `computing` is already false, so its own `guard !computing` passes and it rescores the new data.
+        defer {
+            computing = false
+            activePasses -= 1
+            if let rerunDays = pendingForcedRescoreDays {
+                pendingForcedRescoreDays = nil
+                Task { await self.analyzeRecent(maxDays: rerunDays, force: true) }
+            }
+        }
         guard let store = await repo.storeHandle() else { note = String(localized: "No on-device store yet."); return }
         guard let hrvCfg = Baselines.metricCfg["hrv"],
               let rhrCfg = Baselines.metricCfg["resting_hr"],
@@ -401,23 +467,7 @@ final class IntelligenceEngine: ObservableObject {
            UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey) == wmKey {
             return
         }
-
-        computing = true
-        // #899-A re-arm: clear the lock, then if a forced rescore was dropped while this pass held it,
-        // run it ONCE. The flag is cleared BEFORE the re-invoke (a single re-arm), so a forced call landing
-        // DURING the re-invoke re-arms it again but a quiet one does not , this can never recurse unbounded.
-        // The re-invoke is launched on a fresh `Task` because `defer` is synchronous; by the time it runs
-        // `computing` is already false, so its own `guard !computing` passes and it rescores the new data.
-        defer {
-            computing = false
-            if pendingForcedRescore {
-                pendingForcedRescore = false
-                // Carry THIS pass's window into the re-pass: a heal firing during a wide one-shot pass
-                // must re-score the same width, not the default 21 days (Kotlin re-passes with the same
-                // maxDays; keep the platforms in lockstep).
-                Task { await self.analyzeRecent(maxDays: maxDays, force: true) }
-            }
-        }
+        passWidths.append(maxDays)
 
         let up = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
                              age: Double(profile.age), sex: profile.sex,
@@ -496,10 +546,11 @@ final class IntelligenceEngine: ObservableObject {
         // Returns nil under `habitualMinDays` of history → cold-start: every `analyzeDay`/`sleepEditedDaily`
         // call below stays on the overnight-band bonus. The same value threads into both seams so analytics
         // and the Sleep tab resolve to the identical block. (#547)
+        // Excluded days' sessions (hand-edited ones survive the purge) stay out of the learner too. (I9)
         let habitualMidsleepSec = await Self.computeHabitualMidsleep(
             store: store, importedId: deviceId, computedId: deviceId + "-noop",
             windowStart: nowLocalMidnight - maxDays * 86_400 - 30 * 3_600,
-            windowEnd: now, offsetSec: tzOffset)
+            windowEnd: now, offsetSec: tzOffset, excluded: excluded)
 
         // ── FIX 1 (main-actor jank): run the ENTIRE per-day enumeration OFF the main actor ───────────
         // Every `await store.…` read inside this loop has its continuation RESUME on the main actor
@@ -772,40 +823,17 @@ final class IntelligenceEngine: ObservableObject {
         // rhr/resp/skin honour the Charge-wide recalibration epoch (noop.recoveryBaselineEpoch); 0 = no-op,
         // so this is byte-identical to the plain fold until the user taps Recalibrate, at which point the
         // whole Charge build-up (HRV + resting HR + resp + skin) re-anchors together.
-        let recoveryEpoch = Baselines.recoveryBaselineEpoch()
-        let hrvDayKeys = histHrvByDay.keys.sorted()                         // chronological "yyyy-MM-dd"
-        let hrvSeq = hrvDayKeys.map { histHrvByDay[$0]! }                   // chronological [Double?]
-        let rhrDayKeys = histRhrByDay.keys.sorted()
-        let rhrSeq = rhrDayKeys.map { histRhrByDay[$0]! }
-        let respDayKeys = histRespByDay.keys.sorted()
-        let respSeq = respDayKeys.map { histRespByDay[$0]! }
         // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
-        // so fold purely over the pass-1 nightly means in chronological order.
-        let skinDayKeys = nightlySkinByDay.keys.sorted()
-        let skinSeq = skinDayKeys.map { nightlySkinByDay[$0]! }
-        // Resp baseline gated on `usable`: RecoveryScorer includes the resp term whenever a
-        // baseline object is present , a CALIBRATING (<4-night) baseline would let one noisy
-        // RSA night move recovery (mirrors the skin-temp use-site gate; honest cold-start).
+        // so it folds purely over the pass-1 nightly means.
         // Each night is scored against a baseline folded ONLY over the nights before it (audit A1,
-        // 2026-10-21). One fold over the whole window let a night's own value and every later night
-        // move its Charge, gave the first nights scores before any baseline existed, and shifted past
-        // scores as new nights arrived.
+        // 2026-10-21), over the CALENDAR so days with no row count as missing nights and a long gap
+        // turns the baseline stale (audit I4), folded once per metric instead of once per night (P3).
+        let chargeBaselines = Self.ChargeBaselines(
+            hrv: histHrvByDay, rhr: histRhrByDay, resp: histRespByDay, skin: nightlySkinByDay,
+            cfg: (hrv: hrvCfg, rhr: rhrCfg, resp: respCfg, skin: skinCfg),
+            hrvEpoch: Baselines.hrvBaselineEpoch(), recoveryEpoch: Baselines.recoveryBaselineEpoch())
         func baselinesBefore(_ day: String) -> AnalyticsEngine.ProfileBaselines {
-            let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, before: day, cfg: respCfg,
-                                                 baselineEpoch: recoveryEpoch)
-            // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
-            // (AnalyticsEngine's skinTempDevC guard) so this is belt-and-suspenders, but it stops a
-            // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
-            let skinFold = Baselines.foldHistory(skinSeq, dayKeys: skinDayKeys, before: day, cfg: skinCfg,
-                                                 baselineEpoch: recoveryEpoch)
-            return AnalyticsEngine.ProfileBaselines(
-                // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via
-                // their parallel day keys, so the manual Recalibrate restarts the whole Charge build-up.
-                hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, before: day, cfg: hrvCfg),
-                restingHR: Baselines.foldHistory(rhrSeq, dayKeys: rhrDayKeys, before: day, cfg: rhrCfg,
-                                                 baselineEpoch: recoveryEpoch),
-                resp: respFold.usable ? respFold : nil,
-                skinTemp: skinFold.usable ? skinFold : nil)
+            chargeBaselines.before(day)
         }
 
         // Real (non-detected) workouts in the scored window, used to de-duplicate detected bouts so a
@@ -880,7 +908,7 @@ final class IntelligenceEngine: ObservableObject {
             let daily = sleepEditedDaily(night.daily, detected: night.cachedSleep, editsByStart: editsByStart,
                                          habitualMidsleepSec: habitualMidsleepSec)
             let baselines2 = baselinesBefore(daily.day)
-            let recovery = recomputeRecovery(daily, baselines2)
+            let recovery = Self.recomputeRecovery(daily, baselines2)
             // Charge term-breakdown trace (Group G): only when the Recovery test mode is on. Emits which
             // term moved Charge and which was nil and forced the renorm, tagged `.recovery`. The trace's
             // score is RecoveryScorer.recovery verbatim, so the `recovery` written above is unchanged.
@@ -902,7 +930,9 @@ final class IntelligenceEngine: ObservableObject {
             out.append(Computed(day: daily.day, recovery: recovery, strain: night.strain,
                                 sleepMin: daily.totalSleepMin, hrv: daily.avgHrv,
                                 rhr: daily.restingHr, source: source, confidence: chargeConf,
-                                drivers: drivers, skinTempRel: skinRel))
+                                drivers: drivers, skinTempRel: skinRel,
+                                relearning: recovery == nil && daily.avgHrv != nil
+                                    && baselines2.hrv?.status == .stale))
             // ── Per-day scoring diagnostic (Sleep overhaul §2.5) ─────────────────────────────────────
             // ONE concise, privacy-safe line per scored day into the shareable strap log: the day key, the
             // FINAL computed total-sleep minutes (after any edit substitution), how many sleep blocks the
@@ -1492,16 +1522,24 @@ final class IntelligenceEngine: ObservableObject {
             // matching the Android one-re-pass bound; the budget restores once a pass heals nothing.
             if !healRearmedThisCycle {
                 healRearmedThisCycle = true
-                pendingForcedRescore = true
+                // Carry THIS pass's window into the re-pass: a heal firing during a wide one-shot pass
+                // must re-score the same width, not the default 21 days (Kotlin re-passes with the same
+                // maxDays; keep the platforms in lockstep).
+                pendingForcedRescoreDays = Self.rearmDays(pending: pendingForcedRescoreDays, requested: maxDays)
             }
         } else {
             healRearmedThisCycle = false
         }
         // Make re-detection idempotent across runs: clear the prior computed detected workouts in the
         // scored window (a bout's startTs can drift as more HR arrives, which would otherwise orphan
-        // stale rows under the (deviceId,startTs,sport) key), then re-insert.
-        _ = try? await store.deleteWorkouts(deviceId: computedId, sport: "detected",
-                                            from: windowStart, to: now)
+        // stale rows under the (deviceId,startTs,sport) key), then re-insert. Only from the oldest
+        // SCANNED day's midnight: bouts are detected per calendar day, so deleting from the wider
+        // `windowStart` removed the ~30 h before it every pass and never recreated them, and detected
+        // workouts vanished once they were about `maxDays` old. (Audit I1, 2026-10-21.)
+        _ = try? await store.deleteWorkouts(
+            deviceId: computedId, sport: "detected",
+            from: Self.detectedWorkoutReconcileStart(nowLocalMidnight: nowLocalMidnight, maxDays: maxDays),
+            to: now)
         if !workoutRows.isEmpty { _ = try? await store.upsertWorkouts(workoutRows, deviceId: computedId) }
 
         // #137: a manually-started workout is scored from sparse live HR at save time , near-zero
@@ -1523,6 +1561,17 @@ final class IntelligenceEngine: ObservableObject {
         // short-circuit while it's unchanged. Written ONLY here at the end of a completed run (never on an
         // early guard-return), so an interrupted/failed run can't advance the watermark past unscored data.
         if !wmKey.isEmpty { UserDefaults.standard.set(wmKey, forKey: Self.analyzeWatermarkKey) }
+    }
+
+    /// Where a pass may start deleting detected workouts: the local midnight of the oldest day it scans
+    /// (the same bound as the daily-row reconcile), so it only deletes bouts it re-detects.
+    nonisolated static func detectedWorkoutReconcileStart(nowLocalMidnight: Int, maxDays: Int) -> Int {
+        nowLocalMidnight - (max(1, maxDays) - 1) * 86_400
+    }
+
+    /// The width a re-armed rescore runs at: the widest of what is already pending and the new request.
+    nonisolated static func rearmDays(pending: Int?, requested: Int) -> Int {
+        max(pending ?? 0, requested)
     }
 
     /// UserDefaults key for the #836 idle-tick gate: the `(count:maxTs)` HR fingerprint the last completed
@@ -1652,7 +1701,8 @@ final class IntelligenceEngine: ObservableObject {
     /// baseline is usable (RecoveryScorer gates on `hrvBaseline.usable`, i.e. ≥ minNightsSeed valid
     /// nights) , so the honest null-until-4-nights cold-start is free. Mirrors AnalyticsEngine's own
     /// recovery call + Android IntelligenceEngine.recomputeRecovery. (#78)
-    private func recomputeRecovery(_ daily: DailyMetric, _ baselines: AnalyticsEngine.ProfileBaselines) -> Double? {
+    nonisolated static func recomputeRecovery(_ daily: DailyMetric,
+                                              _ baselines: AnalyticsEngine.ProfileBaselines) -> Double? {
         guard let hrvVal = daily.avgHrv, let rhrVal = daily.restingHr, let hrvBase = baselines.hrv else { return nil }
         // Charge enrichment: feed the Rest COMPOSITE (÷100) as the sleep-quality term instead of raw
         // efficiency, and fold in the night's skin-temp deviation. Both come from the persisted daily
@@ -1705,6 +1755,38 @@ final class IntelligenceEngine: ObservableObject {
         return trace.map { line in
             let body = line.hasPrefix("charge ") ? String(line.dropFirst("charge ".count)) : line
             return "charge day=\(daily.day) " + body
+        }
+    }
+
+    /// The Charge baselines for one scoring pass (HRV, resting HR, respiration, skin temp), each folded
+    /// ONCE over the calendar so `before(day)` answers any night without re-folding the history (P3), and
+    /// counting days with no row as missing nights so a long gap reads `.stale` (I4). HRV honours the
+    /// HRV recalibration epoch; the other three honour the Charge-wide one. Resp and skin temp are handed
+    /// over only when usable: RecoveryScorer includes the resp term whenever a baseline object is present,
+    /// so a calibrating one would let one noisy night move Charge. Pure. (Audit A1/I4/P3, 2026-10-21.)
+    struct ChargeBaselines {
+        let hrv: Baselines.CalendarFold
+        let rhr: Baselines.CalendarFold
+        let resp: Baselines.CalendarFold
+        let skin: Baselines.CalendarFold
+
+        init(hrv: [String: Double?], rhr: [String: Double?], resp: [String: Double?], skin: [String: Double?],
+             cfg: (hrv: MetricCfg, rhr: MetricCfg, resp: MetricCfg, skin: MetricCfg),
+             hrvEpoch: Double, recoveryEpoch: Double) {
+            // A day whose value is nil (an import with no HRV) is a missing night, same as no row.
+            func values(_ m: [String: Double?]) -> [String: Double] { m.compactMapValues { $0 } }
+            self.hrv = Baselines.CalendarFold(values: values(hrv), cfg: cfg.hrv, baselineEpoch: hrvEpoch)
+            self.rhr = Baselines.CalendarFold(values: values(rhr), cfg: cfg.rhr, baselineEpoch: recoveryEpoch)
+            self.resp = Baselines.CalendarFold(values: values(resp), cfg: cfg.resp, baselineEpoch: recoveryEpoch)
+            self.skin = Baselines.CalendarFold(values: values(skin), cfg: cfg.skin, baselineEpoch: recoveryEpoch)
+        }
+
+        func before(_ day: String) -> AnalyticsEngine.ProfileBaselines {
+            let respFold = resp.state(before: day)
+            let skinFold = skin.state(before: day)
+            return AnalyticsEngine.ProfileBaselines(
+                hrv: hrv.state(before: day), restingHR: rhr.state(before: day),
+                resp: respFold.usable ? respFold : nil, skinTemp: skinFold.usable ? skinFold : nil)
         }
     }
 
@@ -1796,14 +1878,20 @@ final class IntelligenceEngine: ObservableObject {
                           deepMin: agg.deepMin, remMin: agg.remMin, lightMin: agg.lightMin)
     }
 
-    /// True when at least `minSamples` HR samples fall inside the local day [dayStart, dayEnd) itself,
-    /// not merely inside the wider read window around it. (Audit A13.)
-    /// Remove what the engine wrote for excluded days: the computed daily row, every metric-series point
-    /// and the detected sleep sessions that end on the day. Raw strap data and hand-edited sessions stay.
+    /// Remove what the engine wrote for excluded days: the computed daily row, every metric-series point,
+    /// the detected sleep sessions that end on the day and the detected workouts that start on it (an
+    /// excluded day outside the pass window kept its auto-detected bouts, audit I2). Raw strap data,
+    /// hand-edited sessions and manual or imported workouts stay.
     static func purgeExcludedDays(_ days: Set<String>, store: WhoopStore, computedId: String,
                                 offsetSec: Int) async {
         for day in days {
             _ = try? await store.deleteDailyMetrics(deviceId: computedId, from: day, to: day)
+            // Bouts are detected per local calendar day, so the day's own [midnight, next midnight).
+            if let idx = epochDayIndex(day) {
+                let midnight = idx * 86_400 - offsetSec
+                _ = try? await store.deleteWorkouts(deviceId: computedId, sport: "detected",
+                                                    from: midnight, to: midnight + 86_400 - 1)
+            }
         }
         _ = try? await store.deleteAllMetricSeries(deviceId: computedId, days: days)
         // A session's day is its wake day; read from 2 days before the oldest to the day after the newest.
@@ -1823,6 +1911,8 @@ final class IntelligenceEngine: ObservableObject {
             .map(\.startTs)
     }
 
+    /// True when at least `minSamples` HR samples fall inside the local day [dayStart, dayEnd) itself,
+    /// not merely inside the wider read window around it. (Audit A13.)
     nonisolated static func hasOwnData(_ hr: [HRSample], dayStart: Int, dayEnd: Int, minSamples: Int = 200) -> Bool {
         var n = 0
         for s in hr where s.ts >= dayStart && s.ts < dayEnd {
@@ -1892,7 +1982,7 @@ final class IntelligenceEngine: ObservableObject {
 
     private static func computeHabitualMidsleep(
         store: WhoopStore, importedId: String, computedId: String,
-        windowStart: Int, windowEnd: Int, offsetSec: Int
+        windowStart: Int, windowEnd: Int, offsetSec: Int, excluded: Set<String>
     ) async -> Int? {
         let imported = (try? await store.sleepSessions(deviceId: importedId, from: windowStart,
                                                        to: windowEnd, limit: 4000)) ?? []
@@ -1905,14 +1995,26 @@ final class IntelligenceEngine: ObservableObject {
         // covers an imported night and its computed twin (the longest capture wins, exactly what the
         // per-day length rule chose anyway).
         let merged = SleepSessionDedup.dedupe(imported + computed).kept
-        let blocks = merged.compactMap { s -> SleepStageTotals.HistoryBlock? in
+        let blocks = habitualHistoryBlocks(merged, excluded: excluded, offsetSec: offsetSec)
+        return SleepStageTotals.habitualMidsleepSec(blocks, offsetSec: offsetSec)
+    }
+
+    /// One learner block per session (effective bounds, keyed by the local day of its midpoint), leaving
+    /// out sessions that wake on an excluded day: a hand-edited "sleep" someone else logged on a day the
+    /// user marked "not me" survives the purge, and used to pull the learned bedtime. Shared with
+    /// `Repository.habitualMidsleepSec` so the Sleep tab and the engine learn the same value. (Audit I9.)
+    nonisolated static func habitualHistoryBlocks(_ sessions: [CachedSleepSession], excluded: Set<String>,
+                                                  offsetSec: Int) -> [SleepStageTotals.HistoryBlock] {
+        sessions.compactMap { s -> SleepStageTotals.HistoryBlock? in
             let start = s.effectiveStartTs, end = s.endTs
             guard end > start else { return nil }
+            if !excluded.isEmpty, excluded.contains(AnalyticsEngine.dayString(end, offsetSec: offsetSec)) {
+                return nil
+            }
             let mid = start + (end - start) / 2
             let dayKey = AnalyticsEngine.dayString(mid, offsetSec: offsetSec)
             return SleepStageTotals.HistoryBlock(start: start, end: end, dayKey: dayKey)
         }
-        return SleepStageTotals.habitualMidsleepSec(blocks, offsetSec: offsetSec)
     }
 
     /// Floor a unix-seconds timestamp to 00:00:00 of its UTC calendar day. Mirrors the Android

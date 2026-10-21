@@ -337,19 +337,138 @@ public enum Baselines {
                              nightsSinceUpdate: 0, status: .calibrating)
     }
 
-    /// `foldHistory(_:dayKeys:cfg:baselineEpoch:)` over only the nights strictly BEFORE `day`
-    /// ("yyyy-MM-dd"; `dayKeys` chronological). A night is scored against what was known going into
-    /// it, never against its own value or later nights, so a past score doesn't shift as new nights
-    /// arrive and the first nights stay calibrating. (Audit A1, 2026-10-21.)
+    /// The baseline going into `day` ("yyyy-MM-dd") from the nights strictly BEFORE it. A night is
+    /// scored against what was known going into it, never against its own value or later nights, so a
+    /// past score doesn't shift as new nights arrive and the first nights stay calibrating. (Audit A1.)
+    ///
+    /// `dayKeys` (parallel to `values`) may skip days: the fold runs over the CALENDAR, so a day with no
+    /// key counts as a missing night exactly like a nil value. Folding only the keyed days hid gaps:
+    /// after three months off the wrist the state stayed "provisional" instead of `.stale`. (Audit I4.)
     public static func foldHistory(_ values: [Double?], dayKeys: [String], before day: String,
                                    cfg: MetricCfg, baselineEpoch: Double? = nil) -> BaselineState {
-        var lo = 0, hi = min(values.count, dayKeys.count)
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if dayKeys[mid] < day { lo = mid + 1 } else { hi = mid }
+        var byDay: [String: Double] = [:]
+        for (i, v) in values.enumerated() where i < dayKeys.count {
+            if let v { byDay[dayKeys[i]] = v } else { byDay[dayKeys[i]] = nil }
         }
-        return foldHistory(Array(values[..<lo]), dayKeys: Array(dayKeys[..<lo]), cfg: cfg,
-                           baselineEpoch: baselineEpoch)
+        return foldCalendar(values: byDay, before: day, cfg: cfg, baselineEpoch: baselineEpoch)
+    }
+
+    // MARK: - Calendar fold (audit I4 / P3, 2026-10-21)
+
+    /// The baseline going into `day` ("yyyy-MM-dd") from per-day nightly values, folded over a dense
+    /// calendar: every day between the first value and the day before `day` is a night, and a day with
+    /// no value is a missing night (skip-and-hold, counted toward `.stale`). Honours the recalibration
+    /// epoch like `foldHistory(_:dayKeys:cfg:baselineEpoch:)` (nil reads the HRV epoch from defaults).
+    /// The engine scores Charge with this, and the Today breakdown calls it so its drivers match.
+    public static func foldCalendar(values: [String: Double], before day: String, cfg: MetricCfg,
+                                    baselineEpoch: Double? = nil) -> BaselineState {
+        CalendarFold(values: values, cfg: cfg, baselineEpoch: baselineEpoch).state(before: day)
+    }
+
+    /// One pass over a metric's whole history that then answers "the baseline going into day D" for
+    /// any D. Re-folding the history for every scored night was O(nights × history) on the main actor;
+    /// this folds once and replays only the missing nights after the last value before D. The answer is
+    /// `foldCalendar`'s exactly (it IS `foldCalendar`'s implementation). (Audit P3.)
+    public struct CalendarFold: Sendable {
+        private let cfg: MetricCfg
+        /// Day indices that carry a value (after the epoch cut), ascending.
+        private let indices: [Int]
+        /// The state after folding through `indices[i]`, missing days before it included.
+        private let after: [BaselineState]
+
+        public init(values: [String: Double], cfg: MetricCfg, baselineEpoch: Double? = nil) {
+            let epoch = baselineEpoch ?? Baselines.hrvBaselineEpoch()
+            var byIndex: [Int: Double] = [:]
+            for (key, v) in values {
+                guard let i = Baselines.dayIndex(key) else { continue }
+                // Same cut as the day-keyed fold: drop (not hold) nights whose UTC day starts before it.
+                if epoch > 0 && Double(i) * 86_400 < epoch { continue }
+                byIndex[i] = v
+            }
+            let sorted = byIndex.keys.sorted()
+            var states: [BaselineState] = []
+            states.reserveCapacity(sorted.count)
+            var state: BaselineState? = nil
+            var prev: Int? = nil
+            for i in sorted {
+                if let p = prev, i - p > 1 {
+                    for _ in (p + 1)..<i { state = Baselines.update(state, value: nil, cfg: cfg) }
+                }
+                state = Baselines.update(state, value: byIndex[i], cfg: cfg)
+                states.append(state!)
+                prev = i
+            }
+            self.cfg = cfg
+            self.indices = sorted
+            self.after = states
+        }
+
+        /// The baseline going into `day`, from the nights strictly before it.
+        public func state(before day: String) -> BaselineState {
+            guard let d = Baselines.dayIndex(day) else { return Baselines.emptyState(cfg) }
+            var lo = 0, hi = indices.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if indices[mid] < d { lo = mid + 1 } else { hi = mid }
+            }
+            guard lo > 0 else { return Baselines.emptyState(cfg) }
+            var s = after[lo - 1]
+            let missing = d - 1 - indices[lo - 1]
+            if missing > 0 {
+                for _ in 0..<missing { s = Baselines.update(s, value: nil, cfg: cfg) }
+            }
+            return s
+        }
+    }
+
+    /// The no-history state every fold returns when nothing was folded.
+    static func emptyState(_ cfg: MetricCfg) -> BaselineState {
+        BaselineState(baseline: (cfg.minVal + cfg.maxVal) / 2.0, spread: cfg.floorSpread, nValid: 0,
+                      nightsSinceUpdate: 0, status: .calibrating)
+    }
+
+    /// Days since 1970-01-01 for a "yyyy-MM-dd" key, or nil when it isn't a real date. Integer civil
+    /// calendar arithmetic (no DateFormatter, no time zone), so it is fast and agrees with UTC day keys.
+    public static func dayIndex(_ key: String) -> Int? {
+        let b = Array(key.utf8)
+        guard b.count == 10, b[4] == 45, b[7] == 45 else { return nil }
+        func num(_ r: Range<Int>) -> Int? {
+            var n = 0
+            for i in r { let c = Int(b[i]) - 48; guard (0...9).contains(c) else { return nil }; n = n * 10 + c }
+            return n
+        }
+        guard let y = num(0..<4), let m = num(5..<7), let d = num(8..<10),
+              (1...12).contains(m), d >= 1 else { return nil }
+        // Reject days past the month's end (2026-02-30).
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+        let monthDays = m == 2 ? (leap ? 29 : 28) : ([4, 6, 9, 11].contains(m) ? 30 : 31)
+        guard d <= monthDays else { return nil }
+        return daysFromCivil(y, m, d)
+    }
+
+    /// The "yyyy-MM-dd" key for a day index (inverse of `dayIndex`).
+    public static func dayKey(fromIndex z: Int) -> String {
+        let zz = z + 719_468
+        let era = (zz >= 0 ? zz : zz - 146_096) / 146_097
+        let doe = zz - era * 146_097
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let d = doy - (153 * mp + 2) / 5 + 1
+        let m = mp < 10 ? mp + 3 : mp - 9
+        let y = yoe + era * 400 + (m <= 2 ? 1 : 0)
+        return String(format: "%04d-%02d-%02d", y, m, d)
+    }
+
+    /// Howard Hinnant's days-from-civil (proleptic Gregorian), day 0 = 1970-01-01.
+    private static func daysFromCivil(_ y0: Int, _ m: Int, _ d: Int) -> Int {
+        let y = m <= 2 ? y0 - 1 : y0
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let mp = (m + 9) % 12
+        let doy = (153 * mp + 2) / 5 + d - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146_097 + doe - 719_468
     }
 
     // MARK: - Deviation
