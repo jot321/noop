@@ -318,6 +318,7 @@ enum DemoScreens {
         case "compare":  return AnyView(CompareView())
         case "settings": return AnyView(SettingsView())
         case "chargebreakdown": return AnyView(ChargeBreakdownDemoHost())
+        case "charts":   return AnyView(ChartGalleryDemoHost())
         case "devices":  return AnyView(DevicesView())
         case "devicescatalog": return AnyView(DeviceCardCatalog())
         case "fitnessage": return AnyView(FitnessAgeDemoScreen())

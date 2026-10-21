@@ -285,22 +285,28 @@ public struct ChartCard<ChartBody: View, Footer: View>: View {
     }
 
     public var body: some View {
+        // Minimal (2026-10-21): title and context on the left, the headline number large on the right,
+        // the chart, then the footer stats with no divider.
         NoopCard(tint: tint) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title).strandOverline()
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title).font(StrandFont.subhead).fontWeight(.semibold)
+                            .foregroundStyle(StrandPalette.textPrimary)
                         if let subtitle { Text(subtitle).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary) }
                     }
-                    Spacer()
-                    if let trailing { Text(trailing).font(StrandFont.bodyNumber).foregroundStyle(StrandPalette.textPrimary) }
+                    Spacer(minLength: 8)
+                    if let trailing {
+                        Text(trailing).font(StrandFont.rounded(20, weight: .semibold)).monospacedDigit()
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .lineLimit(1).minimumScaleFactor(0.7)
+                    }
                 }
-                chart().frame(height: height)
+                // A ceiling, not a fixed height: a chart that sets its own height keeps it (no empty band
+                // above and below), a flexible one still fills `height`.
+                chart().frame(maxHeight: height)
                 let f = footer()
-                if !(f is EmptyView) {
-                    Divider().overlay(StrandPalette.hairline)
-                    f
-                }
+                if !(f is EmptyView) { f }
             }
         }
     }
@@ -314,8 +320,9 @@ public struct ChartFooter: View {
         HStack(spacing: 0) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(it.0).textCase(.uppercase).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                    Text(it.1).font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
+                    Text(it.0).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                    Text(it.1).font(StrandFont.rounded(15, weight: .medium)).monospacedDigit()
+                        .foregroundStyle(StrandPalette.textPrimary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

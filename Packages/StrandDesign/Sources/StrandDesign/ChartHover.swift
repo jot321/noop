@@ -38,35 +38,31 @@ public struct ChartTooltip: View {
     public var body: some View {
         HStack(alignment: .center, spacing: 8) {
             if let accent {
-                Circle()
-                    .fill(accent)
-                    .frame(width: 7, height: 7)
-                    .shadow(color: accent.opacity(0.8), radius: 3)
+                Circle().fill(accent).frame(width: 6, height: 6)
             }
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 0) {
                 Text(value)
-                    .font(StrandFont.captionNumber)
-                    .fontWeight(.semibold)
+                    .font(StrandFont.rounded(15, weight: .semibold))
+                    .monospacedDigit()
                     .foregroundStyle(StrandPalette.textPrimary)
                 if let label {
                     Text(label)
                         .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .foregroundStyle(StrandPalette.textTertiary)
                 }
             }
         }
-        .padding(.horizontal, 9)
+        // Minimal (2026-10-21): a flat bubble with a hairline edge, no drop shadow.
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(StrandPalette.surfaceOverlay)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(StrandPalette.hairlineStrong, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(StrandPalette.hairlineStrong, lineWidth: 0.5)
         )
-        .shadow(color: scheme == .light ? Color(hex: "#1A2230").opacity(0.18) : Color.black.opacity(0.45),
-                radius: scheme == .light ? 8 : 10, x: 0, y: scheme == .light ? 4 : 6)
         .fixedSize()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label != nil ? "\(value), \(label!)" : value)
@@ -149,10 +145,7 @@ struct CrosshairRule: View {
             p.move(to: CGPoint(x: x, y: 0))
             p.addLine(to: CGPoint(x: x, y: height))
         }
-        .stroke(
-            color,
-            style: StrokeStyle(lineWidth: 1, dash: [3, 3])
-        )
+        .stroke(color.opacity(0.8), style: StrokeStyle(lineWidth: 1))
         .allowsHitTesting(false)
     }
 }
@@ -187,12 +180,8 @@ struct NowCapDot: View {
     var color: Color
 
     var body: some View {
-        ZStack {
-            Circle().fill(color.opacity(0.30)).frame(width: 18, height: 18)
-            Circle().fill(color.opacity(0.65)).frame(width: 11, height: 11)
-            Circle().fill(StrandPalette.tipCore).frame(width: 5, height: 5)
-        }
-        .allowsHitTesting(false)
+        // Minimal: the same ringed dot as a highlighted point, no glow.
+        HighlightDot(color: color, diameter: 8)
     }
 }
 

@@ -34,6 +34,7 @@ struct LiquidTodayView: View {
     @State private var vitality: Double?           // exploreSeries("vitality").last
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
+    @State private var hrPoints: [TrendPoint] = [] // the same buckets with their times, for the HR chart
     @State private var workouts: [WorkoutRow] = [] // newest-first
     // History-wide series cached by `loadHistory()`, which runs only when the repository refreshes. A day
     // swipe used to re-read and re-sort them, plus 4,000 days of workouts, on the main actor each time.
@@ -502,24 +503,28 @@ struct LiquidTodayView: View {
             // "Full day" affordance so it's discoverable again. (This comment used to claim the Deep
             // Timeline already drew sleep + activity bands — it didn't at the time; the #979 spin-off
             // added that parity in FullDayChartView.)
-            NavigationLink { FullDayChartView() } label: {
-                card {
-                    VStack(spacing: 10) {
-                        // Isolated leaf: it observes LiveState so the ~1 Hz HR notifies re-render ONLY
-                        // this card, never the whole Today. Shows the current bpm live with a rolling
-                        // beat-by-beat trace; falls back to today's banked 5-minute trace when idle.
-                        LiquidLiveHR(tint: liquidHeart, fallback: hrValues, animated: dataLoaded && !heroOffscreen)
+            // Only the "Full day" row is the link, so pressing and dragging on the chart scrubs it
+            // instead of opening the timeline on release.
+            card {
+                VStack(spacing: 10) {
+                    // Isolated leaf: it observes LiveState so the ~1 Hz HR notifies re-render ONLY
+                    // this card, never the whole Today. Shows the current bpm live with a rolling
+                    // beat-by-beat trace; falls back to today's banked 5-minute chart when idle.
+                    LiquidLiveHR(tint: liquidHeart, fallback: hrValues, points: hrPoints,
+                                 animated: dataLoaded && !heroOffscreen)
+                    NavigationLink { FullDayChartView() } label: {
                         HStack(spacing: 4) {
                             Spacer()
                             Text("Full day").font(StrandFont.caption).foregroundStyle(StrandPalette.accent)
                             Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(StrandPalette.accent)
                         }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens the full-day heart rate timeline")
                 }
             }
-            .buttonStyle(LiquidPressStyle())
-            .accessibilityHint("Opens the full-day heart rate timeline")
         }
     }
 
@@ -976,8 +981,9 @@ struct LiquidTodayView: View {
         priorRhr = prior.compactMap { $0.restingHr.map(Double.init) }
 
         // Day-scoped only: the selected day's HR. History-wide series come from `loadHistory()`.
-        let newHrValues = await repo.hrBuckets(from: from, to: to, bucketSeconds: 300).map { $0.bpm }
-        hrValues = newHrValues
+        let buckets = await repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
+        hrValues = buckets.map(\.bpm)
+        hrPoints = buckets.map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }
         applyDaySeries()
         // First load done — bring the hero gauges + sky to life now the launch churn has settled.
         if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
@@ -1372,6 +1378,7 @@ private struct LiquidAddButton: View {
 private struct LiquidLiveHR: View {
     var tint: Color
     var fallback: [Double]        // today's banked 5-minute buckets — shown when there's no live stream
+    var points: [TrendPoint] = [] // the same buckets with their times, drawn as a scrubbable chart
     var animated: Bool
 
     @EnvironmentObject private var live: LiveState
@@ -1417,7 +1424,20 @@ private struct LiquidLiveHR: View {
                         .animation(.easeOut(duration: 0.25), value: hr)
                 }
             }
-            if series.count >= 2 {
+            if !isLive, points.count >= 2 {
+                let lo = points.map(\.value).min() ?? 40, hi = points.map(\.value).max() ?? 120
+                TrendChart(points: points, valueRange: (lo - 6)...(hi + 6), height: 120,
+                           valueFormat: { "\(Int($0.rounded())) bpm" },
+                           dateFormat: { Self.timeFormatter.string(from: $0) },
+                           accessibilityLabel: String(localized: "Heart rate today"))
+                HStack {
+                    stat("Min", series.min())
+                    Spacer()
+                    stat("Avg", series.reduce(0, +) / Double(series.count))
+                    Spacer()
+                    stat("Max", series.max())
+                }
+            } else if series.count >= 2 {
                 LiquidThread(bpm: series, tint: tint, height: 92, animated: animated)
                 HStack {
                     stat("Min", series.min())
@@ -1442,6 +1462,12 @@ private struct LiquidLiveHR: View {
             beat.toggle()
         }
     }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("HH:mm")
+        return f
+    }()
 
     private func stat(_ label: String, _ v: Double?) -> some View {
         HStack(spacing: 5) {
