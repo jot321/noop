@@ -167,4 +167,36 @@ final class DaytimeStressTests: XCTestCase {
         let r = DaytimeStress.analyze(hr: hr, rr: sparse)
         XCTAssertNil(r.hours.first { $0.hour == 8 }?.rmssd ?? nil)
     }
+    func testHoursInsideASleepSessionAreLeftOut() {
+        // A late sleeper: asleep 02:00-10:00, so 06:00-10:00 falls inside the fixed waking window.
+        // Those calm sleep hours dragged the reference HR down, the first waking hours then read as
+        // HIGH and tripped the "last 3 hours high" Breathe nudge.
+        let asleep = zip(6...9, [48, 47, 49, 48]).flatMap { hourHR($0.0, bpm: $0.1) }
+        let awake = zip(10...13, [68, 66, 69, 67]).flatMap { hourHR($0.0, bpm: $0.1) }
+        let sleep = [(start: 2 * 3_600, end: 10 * 3_600)]
+
+        let r = DaytimeStress.analyze(hr: asleep + awake, rr: [], sleepWindows: sleep)
+        XCTAssertFalse(r.hours.contains { $0.hour < 10 }, "hours spent asleep are not daytime stress")
+        XCTAssertFalse(r.sustainedHigh, "an ordinary morning after a late night is not sustained stress")
+
+        // The waking hours read exactly as if the sleep had never been in the window.
+        let awakeOnly = DaytimeStress.analyze(hr: awake, rr: [])
+        XCTAssertEqual(r.scored.map(\.hour), awakeOnly.scored.map(\.hour))
+        for (a, b) in zip(r.scored, awakeOnly.scored) {
+            XCTAssertEqual(a.level!, b.level!, accuracy: 1e-9)
+        }
+    }
+
+    func testPartlyAsleepHourKeepsItsAwakeMinutes() {
+        // Woke at 10:10: the 10:00 hour keeps its 50 awake minutes; only the asleep samples drop out.
+        let hr = hourHR(10, bpm: 70, n: 3_600) + hourHR(11, bpm: 72) + hourHR(12, bpm: 71)
+        let r = DaytimeStress.analyze(hr: hr, rr: [], sleepWindows: [(start: 3 * 3_600, end: 10 * 3_600 + 600)])
+        XCTAssertTrue(r.scored.contains { $0.hour == 10 })
+    }
+
+    func testNoSleepWindowsKeepsTheOldBehaviour() {
+        let hr = zip(8...12, [62, 64, 63, 90, 65]).flatMap { hourHR($0.0, bpm: $0.1) }
+        XCTAssertEqual(DaytimeStress.analyze(hr: hr, rr: [], sleepWindows: []),
+                       DaytimeStress.analyze(hr: hr, rr: []))
+    }
 }

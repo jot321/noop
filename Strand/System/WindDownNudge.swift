@@ -95,6 +95,30 @@ enum WindDownNudge {
         return ((raw % day) + day) % day
     }
 
+    /// When the nudge for one wake day fires: the weekday and minute-of-day to schedule. A wake time
+    /// earlier than need + lead puts the nudge before midnight, so it belongs to the PREVIOUS evening:
+    /// a Monday 07:00 wake with 8 h 30 m fires Sunday 22:30. Pinning it to the wake's own weekday fired
+    /// it on Monday night, a day late. `wakeWeekday` is a Calendar weekday (1=Sun…7=Sat).
+    static func nudgeSlot(wakeWeekday: Int, wakeMinutes: Int, sleepNeed: Int,
+                          lead: Int) -> (weekday: Int, minute: Int) {
+        let raw = wakeMinutes - sleepNeed - lead
+        let day = 24 * 60
+        let weekday = raw < 0 ? (wakeWeekday + 5) % 7 + 1 : wakeWeekday
+        return (weekday, ((raw % day) + day) % day)
+    }
+
+    /// The "Tonight" pairing: the next wake (this morning's when it hasn't come yet, else tomorrow's),
+    /// with its per-day override if set, and the nudge minute derived from it.
+    static func tonight(now: Date, calendar: Calendar = .current, defaultWake: Int, overrides: [Int: Int],
+                        sleepNeed: Int, lead: Int) -> (wake: Int, nudgeMinute: Int) {
+        let today = calendar.component(.weekday, from: now)
+        let minuteNow = calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now)
+        let todayWake = overrides[today] ?? defaultWake
+        let wakeDay = minuteNow < todayWake ? today : today % 7 + 1
+        let wake = overrides[wakeDay] ?? defaultWake
+        return (wake, nudgeSlot(wakeWeekday: wakeDay, wakeMinutes: wake, sleepNeed: sleepNeed, lead: lead).minute)
+    }
+
     // MARK: - Public API
 
     /// Ask up front (when the user enables the nudge) so the system dialog appears at a predictable
@@ -150,13 +174,16 @@ enum WindDownNudge {
 
         // PR#554 — with per-day overrides set, fan out to seven weekday-pinned triggers each at that day's
         // own nudge time; with none, keep the single daily trigger (identical to the pre-#554 behaviour).
+        // Each trigger is keyed by its WAKE day and fires on the evening before it when the nudge falls
+        // before midnight (`nudgeSlot`).
         if hasPerDayOverrides {
             for weekday in 1...7 {
-                let minute = nudgeMinuteOfDay(forWeekday: weekday)
+                let slot = nudgeSlot(wakeWeekday: weekday, wakeMinutes: wakeMinutes(forWeekday: weekday),
+                                     sleepNeed: sleepNeedMinutes, lead: leadMinutes)
                 var comps = DateComponents()
-                comps.weekday = weekday   // Calendar weekday 1=Sun…7=Sat → fires weekly on that day
-                comps.hour = minute / 60
-                comps.minute = minute % 60
+                comps.weekday = slot.weekday   // Calendar weekday 1=Sun…7=Sat → fires weekly on that day
+                comps.hour = slot.minute / 60
+                comps.minute = slot.minute % 60
                 let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: true)
                 center.add(UNNotificationRequest(identifier: "\(requestId)-wd\(weekday)",
                                                  content: content, trigger: trigger))
