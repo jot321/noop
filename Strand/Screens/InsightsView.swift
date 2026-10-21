@@ -1206,27 +1206,32 @@ struct InsightsView: View {
 
     private func computeRelationships() -> [Relationship] {
         func series(_ key: String) -> [(day: String, value: Double)] { seriesByKey[key] ?? [] }
+        // A relationship card needs about ten paired days: on three or four, r swings on one night and the
+        // card claimed "p < 0.05" from a normal tail that understates small-sample p. (Audit I10.)
+        func enough(_ c: Correlation?) -> Correlation? {
+            c.flatMap { $0.n >= CorrelationEngine.minPairsForSignificance ? $0 : nil }
+        }
         var out: [Relationship] = []
 
         // Sleep performance ↔ recovery (same day).
-        if let c = CorrelationEngine.pearson(
-            CorrelationEngine.alignByDay(series("sleep_performance"), series("recovery"))) {
+        if let c = enough(CorrelationEngine.pearson(
+            CorrelationEngine.alignByDay(series("sleep_performance"), series("recovery")))) {
             out.append(.init(id: "sleep-rec",
                              title: String(localized: "Rest ↔ Charge"),
                              blurb: String(localized: "How closely a good night tracks next-morning charge."),
                              corr: c))
         }
         // HRV ↔ recovery (same day).
-        if let c = CorrelationEngine.pearson(
-            CorrelationEngine.alignByDay(series("hrv"), series("recovery"))) {
+        if let c = enough(CorrelationEngine.pearson(
+            CorrelationEngine.alignByDay(series("hrv"), series("recovery")))) {
             out.append(.init(id: "hrv-rec",
                              title: String(localized: "HRV ↔ Charge"),
                              blurb: String(localized: "Heart-rate variability as the engine behind your charge score."),
                              corr: c))
         }
         // Resting HR ↔ recovery (same day), expected to be negative.
-        if let c = CorrelationEngine.pearson(
-            CorrelationEngine.alignByDay(series("rhr"), series("recovery"))) {
+        if let c = enough(CorrelationEngine.pearson(
+            CorrelationEngine.alignByDay(series("rhr"), series("recovery")))) {
             out.append(.init(id: "rhr-rec",
                              title: String(localized: "Resting HR ↔ Charge"),
                              blurb: String(localized: "A lower resting heart rate usually means a higher charge."),
@@ -1235,7 +1240,7 @@ struct InsightsView: View {
         // Today's recovery ↔ NEXT-day recovery (1-day lag) as a strain/carry-over proxy.
         // (Strain series isn't in the outcome set; recovery→next-day recovery shows
         //  how much yesterday carries into today.)
-        if let c = CorrelationEngine.lagged(x: series("recovery"), y: series("recovery"), lagDays: 1) {
+        if let c = enough(CorrelationEngine.lagged(x: series("recovery"), y: series("recovery"), lagDays: 1)) {
             out.append(.init(id: "rec-lag",
                              title: String(localized: "Charge → Next-day charge"),
                              blurb: String(localized: "How much one day's charge carries into the next."),
@@ -1266,8 +1271,8 @@ struct InsightsView: View {
                 Text(String(format: "r = %+.2f", r))
                     .font(StrandFont.number(16))
                     .foregroundStyle(strength)
-                StatePill(rel.corr.pApprox < 0.05 ? "p < 0.05" : "n.s.",
-                          tone: rel.corr.pApprox < 0.05 ? .accent : .neutral,
+                StatePill(rel.corr.significant ? "p < 0.05" : "n.s.",
+                          tone: rel.corr.significant ? .accent : .neutral,
                           showsDot: false)
             }
 

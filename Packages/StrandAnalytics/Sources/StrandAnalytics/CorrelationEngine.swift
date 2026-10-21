@@ -12,11 +12,12 @@ import Foundation
 //
 // The p-value uses the standard t-statistic for a correlation,
 //   t = r · sqrt( (n−2) / (1−r²) ),
-// converted to a two-sided tail probability via a NORMAL approximation
-// (2·(1−Φ(|t|))). This is an approximation — for small n the true Student-t tails
-// are heavier, so pApprox slightly understates p — but it is fully deterministic
-// and needs no special-function tables. Φ is evaluated with the Abramowitz &
-// Stegun 7.1.26 erf rational approximation.
+// converted to a two-sided tail probability with the Student-t distribution on n−2
+// degrees of freedom, P(|T| ≥ |t|) = I_{ν/(ν+t²)}(ν/2, ½) (regularized incomplete beta,
+// continued fraction). The earlier normal tail understated p badly at small n (five
+// pairs at r ≈ 0.77: 0.034 instead of 0.124), so Insights printed "p < 0.05" on a few
+// days of data. Callers that make a significance claim also need
+// `minPairsForSignificance` pairs; `Correlation.significant` checks both. (Audit I10.)
 //
 // `alignByDay` inner-joins two "yyyy-MM-dd"-keyed series on the day key, returning
 // (x, y) pairs sorted by day. `lagged` shifts y forward by `lagDays` relative to x
@@ -30,7 +31,7 @@ public struct Correlation: Equatable, Sendable {
     public let r: Double
     /// Number of paired observations used.
     public let n: Int
-    /// Approximate two-sided p-value for H0: r = 0 (normal approx of the t-test).
+    /// Two-sided p-value for H0: r = 0 (Student-t on n − 2 degrees of freedom).
     public let pApprox: Double
     /// OLS slope of y on x.
     public let slope: Double
@@ -44,9 +45,19 @@ public struct Correlation: Equatable, Sendable {
         self.slope = slope
         self.intercept = intercept
     }
+
+    /// True only with enough pairs AND p < 0.05. A correlation over a handful of days can clear 0.05 by
+    /// luck, so a "p < 0.05" label needs `CorrelationEngine.minPairsForSignificance` pairs too.
+    public var significant: Bool {
+        n >= CorrelationEngine.minPairsForSignificance && pApprox < 0.05
+    }
 }
 
 public enum CorrelationEngine {
+
+    /// Pairs below which a correlation is shown as a description only, never as significant. r can
+    /// still be computed from 3 pairs; claiming significance on fewer than ~10 days is not honest.
+    public static let minPairsForSignificance = 10
 
     // MARK: - Pearson + regression
 
@@ -131,15 +142,60 @@ public enum CorrelationEngine {
 
     // MARK: - p-value
 
-    /// Two-sided p-value for H0: r = 0 via t = r·sqrt((n−2)/(1−r²)) and a normal
-    /// approximation of the t tail. n ≤ 2 → 1.0 (no evidence); |r| = 1 → 0.0.
+    /// Two-sided p-value for H0: r = 0 via t = r·sqrt((n−2)/(1−r²)) and the Student-t tail on
+    /// n − 2 degrees of freedom. n ≤ 2 → 1.0 (no evidence); |r| = 1 → 0.0.
     static func pValue(r: Double, n: Int) -> Double {
         guard n > 2 else { return 1.0 }
         let oneMinusR2 = 1.0 - r * r
         if oneMinusR2 <= 0 { return 0.0 }  // |r| == 1
         let t = r * (Double(n - 2) / oneMinusR2).squareRoot()
-        // Two-sided tail of the standard normal at |t|.
-        return 2.0 * (1.0 - normalCDF(abs(t)))
+        return studentTTwoSided(t: t, df: Double(n - 2))
+    }
+
+    /// P(|T| ≥ |t|) for Student's t with `df` degrees of freedom: I_{df/(df+t²)}(df/2, 1/2).
+    static func studentTTwoSided(t: Double, df: Double) -> Double {
+        guard df > 0 else { return 1.0 }
+        guard t.isFinite else { return 0.0 }
+        let x = df / (df + t * t)
+        return min(1.0, max(0.0, regularizedIncompleteBeta(x: x, a: df / 2, b: 0.5)))
+    }
+
+    /// The regularized incomplete beta I_x(a, b), by the Numerical Recipes continued fraction (modified
+    /// Lentz), using I_x(a,b) = 1 − I_{1−x}(b,a) on the side where the fraction converges slowly.
+    static func regularizedIncompleteBeta(x: Double, a: Double, b: Double) -> Double {
+        if x <= 0 { return 0 }
+        if x >= 1 { return 1 }
+        let front = exp(lgamma(a + b) - lgamma(a) - lgamma(b) + a * log(x) + b * log(1 - x))
+        if x < (a + 1) / (a + b + 2) {
+            return front * betaContinuedFraction(x: x, a: a, b: b) / a
+        }
+        return 1 - front * betaContinuedFraction(x: 1 - x, a: b, b: a) / b
+    }
+
+    private static func betaContinuedFraction(x: Double, a: Double, b: Double) -> Double {
+        let tiny = 1e-300, eps = 1e-15
+        let qab = a + b, qap = a + 1, qam = a - 1
+        var c = 1.0
+        var d = 1 - qab * x / qap
+        if abs(d) < tiny { d = tiny }
+        d = 1 / d
+        var h = d
+        for m in 1...500 {
+            let md = Double(m), m2 = 2 * md
+            var aa = md * (b - md) * x / ((qam + m2) * (a + m2))
+            d = 1 + aa * d; if abs(d) < tiny { d = tiny }
+            c = 1 + aa / c; if abs(c) < tiny { c = tiny }
+            d = 1 / d
+            h *= d * c
+            aa = -(a + md) * (qab + md) * x / ((a + m2) * (qap + m2))
+            d = 1 + aa * d; if abs(d) < tiny { d = tiny }
+            c = 1 + aa / c; if abs(c) < tiny { c = tiny }
+            d = 1 / d
+            let del = d * c
+            h *= del
+            if abs(del - 1) < eps { break }
+        }
+        return h
     }
 
     /// Standard-normal CDF Φ(z) using the A&S 7.1.26 erf approximation.
