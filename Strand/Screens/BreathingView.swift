@@ -25,6 +25,14 @@ import StrandAnalytics
 /// absent that we fall back to a local one, so the view always compiles + the card surface always exists.
 struct BreathingView: View {
     var body: some View { BreathingContent() }
+
+    /// RMSSD (ms) of the live R-R buffer after the shared cleaner (range filter + Malik ectopic
+    /// rejection), differencing only beats that were adjacent. Raw differences let one missed or extra
+    /// beat swing the reading by hundreds of ms, so an artefact read as "Deep calm". nil until there is
+    /// at least one clean pair.
+    static func liveRMSSD(_ intervals: [Int]) -> Double? {
+        HRVAnalyzer.rmssd(diffs: HRVAnalyzer.adjacentDiffs(intervals.map(Double.init)))
+    }
 }
 
 private struct BreathingContent: View {
@@ -183,8 +191,11 @@ private struct BreathingContent: View {
             guard running else { return }
             sessionSeconds += 1
         }
-        .onChangeCompat(of: live.rr) { rr in
-            ingest(rr)
+        // Every packet, including one equal to the last: `onChange(of: live.rr)` skipped a repeat (two
+        // one-beat packets at a steady rate), dropping real beats from the buffer. `dropFirst` skips the
+        // packet already on screen when the view appears.
+        .task {
+            for await packet in live.$rr.dropFirst().values { ingest(packet) }
         }
         .onChangeCompat(of: pace) { _ in
             if running { armPhase(.inhale, from: Date(), buzz: false) }
@@ -667,7 +678,7 @@ private struct BreathingContent: View {
         if rrBuffer.count > rrWindow {
             rrBuffer.removeFirst(rrBuffer.count - rrWindow)
         }
-        rmssd = computeRMSSD(rrBuffer)
+        rmssd = BreathingView.liveRMSSD(rrBuffer)
         if running, let r = rmssd {
             if baselineRmssd == nil && sessionSeconds <= 60 { baselineRmssd = r }
             sessionRmssdSum += r
@@ -676,16 +687,6 @@ private struct BreathingContent: View {
         }
     }
 
-    private func computeRMSSD(_ intervals: [Int]) -> Double? {
-        guard intervals.count >= 2 else { return nil }
-        var sumSq = 0.0
-        for i in 1..<intervals.count {
-            let d = Double(intervals[i] - intervals[i - 1])
-            sumSq += d * d
-        }
-        let meanSq = sumSq / Double(intervals.count - 1)
-        return meanSq.squareRoot()
-    }
 
     // MARK: - Formatting
 
