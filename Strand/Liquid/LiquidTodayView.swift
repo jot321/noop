@@ -46,6 +46,9 @@ struct LiquidTodayView: View {
     @State private var weekRhr: [Double] = []
     @State private var weekResp: [Double] = []
     @State private var weekSteps: [Double] = []
+    /// The days before the selected day inside the same 7-day window, for the "vs 7 days" captions.
+    @State private var priorHrv: [Double] = []
+    @State private var priorRhr: [Double] = []
 
     // sheets / expanders
     @State private var guideSection: ScoreSection?
@@ -753,10 +756,10 @@ struct LiquidTodayView: View {
         let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm
         return VStack(spacing: 8) {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2), spacing: 8) {
-                tile("HRV", intText(hrv), "ms", caption: deltaCaption(hrv, weekHrv, unit: "ms")) {
+                tile("HRV", intText(hrv), "ms", caption: deltaCaption(hrv, priorHrv, unit: "ms")) {
                     MinimalLine(values: weekHrv, minSpan: 8)
                 }
-                tile("Resting HR", intText(rhr), "bpm", caption: deltaCaption(rhr, weekRhr, unit: "")) {
+                tile("Resting HR", intText(rhr), "bpm", caption: deltaCaption(rhr, priorRhr, unit: "")) {
                     MinimalLine(values: weekRhr, minSpan: 6)
                 }
                 tile("Sleep", sleepText, "", caption: sleepWindowCaption) { sleepStageBar }
@@ -836,10 +839,17 @@ struct LiquidTodayView: View {
         switch v { case ..<1: return "Calm"; case ..<2: return "Moderate"; default: return "High" }
     }
 
-    /// "+4 ms vs 7 days" against the mean of the earlier days in the series.
-    private func deltaCaption(_ today: Double?, _ week: [Double], unit: String) -> String {
-        guard let t = today, week.count >= 3 else { return "7-day trend" }
-        let prior = week.dropLast()
+    /// The rows inside the 7 calendar days ending on `day` (oldest first). A gap in the history stays
+    /// a gap: taking the last 7 rows instead reached back months when the strap was off for a while,
+    /// so "vs 7 days" compared last night with old naps.
+    static func calendarWeek(_ days: [DailyMetric], endingOn day: String) -> [DailyMetric] {
+        let start = WeeklyDigestEngine.addDays(day, -6)
+        return days.filter { $0.day >= start && $0.day <= day }.sorted { $0.day < $1.day }
+    }
+
+    /// "+4 ms vs 7 days" against the mean of the earlier days in this calendar week (at least 3).
+    private func deltaCaption(_ today: Double?, _ prior: [Double], unit: String) -> String {
+        guard let t = today, prior.count >= 3 else { return "7-day trend" }
         let mean = prior.reduce(0, +) / Double(prior.count)
         let d = Int((t - mean).rounded())
         let u = unit.isEmpty ? "" : " \(unit)"
@@ -956,11 +966,14 @@ struct LiquidTodayView: View {
             : Int((cal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart).timeIntervalSince1970)
 
         // 7-day series ending on the selected day for the tiles (oldest first), resolved once here.
-        let week = repo.days.filter { $0.day <= selectedDayKey }.sorted { $0.day < $1.day }.suffix(7)
+        let week = Self.calendarWeek(repo.days, endingOn: selectedDayKey)
         weekHrv = week.compactMap { $0.avgHrv }
         weekRhr = week.compactMap { $0.restingHr.map(Double.init) }
         weekResp = week.compactMap { $0.respRateBpm }
         weekSteps = week.compactMap { $0.steps.map(Double.init) }
+        let prior = week.filter { $0.day < selectedDayKey }
+        priorHrv = prior.compactMap { $0.avgHrv }
+        priorRhr = prior.compactMap { $0.restingHr.map(Double.init) }
 
         // Day-scoped only: the selected day's HR. History-wide series come from `loadHistory()`.
         let newHrValues = await repo.hrBuckets(from: from, to: to, bucketSeconds: 300).map { $0.bpm }
