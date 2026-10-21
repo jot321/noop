@@ -1391,11 +1391,16 @@ struct SleepView: View {
     /// is ONE ◀/▶ stop, so a split-sleep day reads as a single night and the "N nights ago" label
     /// stays truthful — two blocks of the same day are never "1 night ago" AND "2 nights ago". (#170)
     private var navDays: [[CachedSleepSession]] {
-        let cal = Calendar.current
+        SleepView.groupByEndDay(navSessions)
+    }
+
+    /// Blocks grouped by the calendar day they END on, newest day first, oldest→newest inside a day.
+    static func groupByEndDay(_ sessions: [CachedSleepSession],
+                              calendar: Calendar = .current) -> [[CachedSleepSession]] {
         func endDay(_ s: CachedSleepSession) -> Date {
-            cal.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(s.endTs)))
+            calendar.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(s.endTs)))
         }
-        let groups = Dictionary(grouping: navSessions, by: endDay)
+        let groups = Dictionary(grouping: sessions, by: endDay)
         return groups.keys.sorted(by: >).map { key in
             (groups[key] ?? []).sorted { $0.effectiveStartTs < $1.effectiveStartTs }
         }
@@ -1495,7 +1500,7 @@ struct SleepView: View {
     /// target. A stub is spurious only when it's BRIEF and essentially sleepless AND a later fragment carries
     /// the real sleep; otherwise the earliest effective onset stands (single-block and normal biphasic nights
     /// are byte-identical). Returns a real fragment's `effectiveStartTs`, never a synthetic value.
-    private func nightOnsetTs(_ group: [CachedSleepSession]) -> Int {
+    static func nightOnsetTs(_ group: [CachedSleepSession]) -> Int {
         // group is ascending by effective onset; first is the earliest fragment.
         guard let first = group.first else { return 0 }
         // Walk past any leading spurious pre-onset awake stubs to the first real-sleep fragment.
@@ -1510,9 +1515,9 @@ struct SleepView: View {
     /// A fragment is a spurious pre-onset awake stub when it's within the lie-in cap (<= `preOnsetStubMaxMin`)
     /// and carries essentially no sleep (asleep minutes <= `preOnsetStubAsleepMaxMin`). Used only to skip such
     /// a stub when it leads the main-night group, so the displayed bedtime tracks where real sleep began. (#736)
-    private func isPreOnsetAwakeStub(_ frag: CachedSleepSession) -> Bool {
+    private static func isPreOnsetAwakeStub(_ frag: CachedSleepSession) -> Bool {
         let spanMin = Double(frag.endTs - frag.effectiveStartTs) / 60.0
-        let asleepMin = SleepView.decodeStages(frag.stagesJSON)?.asleep ?? 0
+        let asleepMin = decodeStages(frag.stagesJSON)?.asleep ?? 0
         return SleepView.isPreOnsetAwakeStub(spanMin: spanMin, asleepMin: asleepMin)
     }
 
@@ -1602,7 +1607,7 @@ struct SleepView: View {
         // The displayed bedtime is the night's MAIN onset, aligned to the same fragment the pencil edits.
         // The latest wake closes the span. (#318, #736)
         guard let last = fullGroup.last else { return nil }
-        let onset = nightOnsetTs(fullGroup), wake = last.endTs
+        let onset = SleepView.nightOnsetTs(fullGroup), wake = last.endTs
         // Aggregate (stages, hypnogram, motion) from the displayed onset fragment onward so the chart and
         // the totals start where the bedtime label does — a spurious leading pre-sleep awake stub is dropped
         // from the night's reconstruction (#736). It still rides in `sourceBlocks`/`mainGroupStarts`, so it's
@@ -1761,16 +1766,36 @@ struct SleepView: View {
             let series = repo.days.compactMap { imported[$0.day]?.consistencyPct }
             return (series.last, mean(series), series)
         }
-        let cal = Calendar.current
-        func bedMinutes(_ s: CachedSleepSession) -> Double {
-            let d = Date(timeIntervalSince1970: TimeInterval(s.effectiveStartTs))
-            let comps = cal.dateComponents([.hour, .minute], from: d)
+        let scores = SleepView.bedtimeConsistency(days: navDays, habitualMidsleepSec: habitualMidsleepSec)
+        guard !scores.isEmpty else { return (nil, nil, []) }
+        return (scores.last, mean(scores), scores)
+    }
+
+    /// `bedtimeConsistency(days:)` over raw blocks, grouped by the day they end on like the hero.
+    static func bedtimeConsistency(_ sessions: [CachedSleepSession], habitualMidsleepSec: Int?,
+                                   calendar: Calendar = .current) -> [Double] {
+        bedtimeConsistency(days: groupByEndDay(sessions, calendar: calendar),
+                           habitualMidsleepSec: habitualMidsleepSec, calendar: calendar)
+    }
+
+    /// Rolling bedtime-consistency scores (0-100), oldest first: the SD of the last up-to-14 bedtimes
+    /// mapped so 0 min spread reads 100 and 2 h reads 0. Needs at least 3 bedtimes. A bedtime is each
+    /// day's MAIN-night onset (the one the hero shows), never every block: since #715 the session list
+    /// holds naps and the halves of a split night too, and counting those read a regular sleeper as 0%.
+    /// `days` is newest first, as `navDays` carries it.
+    static func bedtimeConsistency(days: [[CachedSleepSession]], habitualMidsleepSec: Int?,
+                                   calendar: Calendar = .current) -> [Double] {
+        func bedMinutes(_ ts: Int) -> Double {
+            let comps = calendar.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: TimeInterval(ts)))
             var m = Double((comps.hour ?? 0) * 60 + (comps.minute ?? 0))
             if m < 12 * 60 { m += 24 * 60 }   // wrap evening onsets into one continuous scale
             return m
         }
-        let mins = repo.sleeps.map(bedMinutes)
-        guard mins.count >= 3 else { return (nil, nil, []) }
+        let mins = days.reversed().compactMap { blocks -> Double? in
+            let group = mainNightGroup(blocks, habitualMidsleepSec: habitualMidsleepSec)
+            return group.isEmpty ? nil : bedMinutes(nightOnsetTs(group))
+        }
+        guard mins.count >= 3 else { return [] }
         var scores: [Double] = []
         for i in mins.indices {
             let lo = Swift.max(0, i - 13)
@@ -1781,7 +1806,7 @@ struct SleepView: View {
             let sd = variance.squareRoot()
             scores.append(Swift.max(0, Swift.min(100, 100 * (1 - sd / 120))))
         }
-        return (scores.last, mean(scores), scores)
+        return scores
     }
 
     /// Hours vs needed % = asleep / need (can exceed 100 on a long night). The imported
