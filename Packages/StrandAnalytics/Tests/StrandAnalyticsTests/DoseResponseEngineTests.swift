@@ -182,4 +182,40 @@ final class DoseResponseEngineTests: XCTestCase {
         XCTAssertEqual(r.outcome, "HRV")
         XCTAssertEqual(r.perUnit, -4.0, accuracy: 1e-12)   // the documented caffeine→HRV prior
     }
+
+    // MARK: - No personal slope means prior-dominated (audit I5, 2026-10-21)
+
+    /// Twelve "yes" days with no dose rows all read dose 1, so there is no spread and no personal slope.
+    /// The number shown is the population prior, so it must say "typical", not "your data" or SOLID.
+    func testNoDoseSpreadStaysPriorDominatedWhateverTheDayCount() {
+        var doses: [String: Int] = [:]
+        var outcome: [String: Double] = [:]
+        for month in 1...12 {
+            doses[ymd(2026, month, 10)] = 1
+            outcome[ymd(2026, month, 11)] = 60 + Double(month % 4)
+        }
+        let r = DoseResponseEngine.estimate(behavior: .alcohol, doseByDay: doses, outcomeByDay: outcome)!
+        XCTAssertEqual(r.nUser, 12)
+        XCTAssertNil(r.userSlope)
+        XCTAssertEqual(r.perUnit, alcoholPrior, accuracy: 1e-12)
+        XCTAssertTrue(r.priorDominated)
+        XCTAssertEqual(r.confidence, .calibrating)
+    }
+
+    /// lagDays 0 pairs a dose day with the SAME day's outcome (wake-day keyed journal answers).
+    func testLagZeroPairsTheSameDay() {
+        var doses: [String: Int] = [:]
+        var sameDay: [String: Double] = [:]
+        for (i, month) in (1...8).enumerated() {
+            let dose = i % 4
+            doses[ymd(2026, month, 10)] = dose
+            sameDay[ymd(2026, month, 10)] = 80.0 - 2.0 * Double(dose)
+        }
+        let lag0 = DoseResponseEngine.estimate(behavior: .alcohol, doseByDay: doses, outcomeByDay: sameDay,
+                                               lagDays: 0)!
+        XCTAssertEqual(lag0.nUser, 8)
+        XCTAssertEqual(lag0.userSlope!, -2.0, accuracy: 1e-9)
+        let lag1 = DoseResponseEngine.estimate(behavior: .alcohol, doseByDay: doses, outcomeByDay: sameDay)!
+        XCTAssertEqual(lag1.nUser, 0, "the default D+1 pairing finds none of these same-day outcomes")
+    }
 }

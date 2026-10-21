@@ -596,9 +596,12 @@ final class InsightsHubViewModel: ObservableObject {
             let outcomeName = DoseResponsePriors.defaultOutcome(for: behavior)
             let outcomeKey = Self.outcomeKey(forEngineName: outcomeName)
             let outcomeDays = byKey[outcomeKey] ?? [:]
+            // Journal days are wake-day keys (an answer covers the evening before that morning), so the
+            // dose pairs with the SAME key's outcome; D+1 skipped a night. (Audit I5.)
             guard let response = DoseResponseEngine.estimate(behavior: behavior,
                                                              doseByDay: doses,
-                                                             outcomeByDay: outcomeDays) else { continue }
+                                                             outcomeByDay: outcomeDays,
+                                                             lagDays: 0) else { continue }
             let latest = outcomeDays.keys.max().flatMap { outcomeDays[$0] }
             cards.append(DoseCard(behavior: behavior, response: response, latestOutcome: latest))
         }

@@ -7,8 +7,10 @@ import Foundation
 // (alcohol: drinks 0/1/2/3+; caffeine: a time-of-day bucket 0..3). For a dosed behaviour
 // we estimate "how much does each extra unit move tomorrow's outcome FOR YOU?":
 //
-//   1. Pair (dose_d, outcome_{d+1}) for each logged day with a next-day outcome (the same
-//      L=1 alignment EffectRanker / ActivityCostEngine use, via CorrelationEngine.shiftDay).
+//   1. Pair (dose_d, outcome_{d+L}) for each logged day with an outcome L days on (default L=1,
+//      via CorrelationEngine.shiftDay). Journal answers are keyed to the WAKE day (they describe the
+//      evening before that morning), so the hub passes L=0: last night's drinks against this
+//      morning's Charge. Pairing them with D+1 skipped a night. (Audit I5, 2026-10-21.)
 //   2. Fit the PERSONAL slope β_user = OLS slope of outcome on dose via the slope that
 //      CorrelationEngine.pearson already returns; n_user = paired days. (pearson needs ≥ 3
 //      pairs AND spread in both axes; if it can't fit, β_user is undefined → pure prior.)
@@ -23,6 +25,9 @@ import Foundation
 // HONESTY baked in (the product IS the honesty):
 //   - Below the dose gate (n_user < minDoseDays) the result is flagged `priorDominated` so the
 //     card can say "based mostly on typical patterns, not yet yours" and show the prior.
+//   - With no personal slope (every logged dose the same, so no spread to fit) the number IS the
+//     prior however many days back it, so it stays `priorDominated` and `.calibrating`. Without
+//     this, twelve plain "yes" days (all dose 1) showed the prior labelled "your data" and SOLID.
 //   - Once the user has enough data, the PERSON overrides the population: if the personal slope
 //     contradicts the prior (e.g. your drink-nights show no dip), β follows the user, and
 //     `contradictsPrior` flags the "in your data so far, this doesn't move your Charge" copy.
@@ -144,26 +149,30 @@ public enum DoseResponseEngine {
     /// - Returns: a `DoseResponse`, or nil when no prior is documented for the behaviour.
     public static func estimate(behavior: DosedBehavior,
                                 doseByDay: [String: Int],
-                                outcomeByDay: [String: Double]) -> DoseResponse? {
+                                outcomeByDay: [String: Double],
+                                lagDays: Int = 1) -> DoseResponse? {
         let outcome = DoseResponsePriors.defaultOutcome(for: behavior)
         return estimate(behavior: behavior, outcome: outcome,
-                        doseByDay: doseByDay, outcomeByDay: outcomeByDay)
+                        doseByDay: doseByDay, outcomeByDay: outcomeByDay, lagDays: lagDays)
     }
 
     /// Estimate the prior-shrunk dose-response for a behaviour against a NAMED outcome.
     /// Returns nil when `(behaviour, outcome)` has no documented prior to shrink toward.
+    /// `lagDays` pairs dose day D with the outcome on D+lagDays: 1 for doses keyed to the day they
+    /// were taken, 0 for wake-day keyed journal answers (the outcome is that same morning).
     public static func estimate(behavior: DosedBehavior,
                                 outcome: String,
                                 doseByDay: [String: Int],
-                                outcomeByDay: [String: Double]) -> DoseResponse? {
+                                outcomeByDay: [String: Double],
+                                lagDays: Int = 1) -> DoseResponse? {
         guard let prior = DoseResponsePriors.prior(for: behavior, outcome: outcome) else { return nil }
 
-        // Pair each logged dose day D with the NEXT-day outcome (D+1) — the L=1 alignment.
+        // Pair each logged dose day D with the outcome on D+lagDays.
         var pairs: [(Double, Double)] = []
         // Sort the day keys so the pair order (and thus any float reduction) is deterministic.
         for day in doseByDay.keys.sorted() {
             let dose = doseByDay[day]!
-            guard let d1 = CorrelationEngine.shiftDay(day, by: 1),
+            guard let d1 = CorrelationEngine.shiftDay(day, by: lagDays),
                   let outVal = outcomeByDay[d1] else { continue }
             pairs.append((Double(dose), outVal))
         }
@@ -172,8 +181,9 @@ public enum DoseResponseEngine {
         // Personal OLS slope of outcome on dose (nil if < 3 pairs or no spread in either axis).
         let userSlope = CorrelationEngine.pearson(pairs)?.slope
 
-        // Shrinkage weight: 0 with no data, → 1 as data accumulates past k.
-        let w = Double(nUser) / (Double(nUser) + shrinkageK)
+        // Shrinkage weight: 0 with no data, → 1 as data accumulates past k. 0 with no personal slope
+        // too: nothing of the user's went into the number.
+        let w = userSlope == nil ? 0 : Double(nUser) / (Double(nUser) + shrinkageK)
 
         // Blend, then clamp to the prior's sane range. With no usable personal slope the blend
         // falls back to the prior alone (w applied to nothing), which is the honest cold-start.
@@ -185,7 +195,8 @@ public enum DoseResponseEngine {
         }
         let perUnit = clamp(blended, prior.clampLow, prior.clampHigh)
 
-        let priorDominated = nUser < minDoseDays
+        // No personal slope: the number is the prior alone, however many days were logged.
+        let priorDominated = nUser < minDoseDays || userSlope == nil
         // Person overrides population only once they have enough data AND the signs disagree
         // (e.g. prior says drinking lowers Charge but your slope is ≥ 0). A flat personal slope
         // counts as "doesn't move it the way it typically does."
@@ -196,7 +207,7 @@ public enum DoseResponseEngine {
             contradicts = false
         }
 
-        let confidence = confidenceFor(nUser: nUser)
+        let confidence: ScoreConfidence = userSlope == nil ? .calibrating : confidenceFor(nUser: nUser)
 
         // Curve: relative outcome delta from a 0-dose anchor, dose 0…maxCurveDose, using perUnit.
         var curve: [DoseCurvePoint] = []
