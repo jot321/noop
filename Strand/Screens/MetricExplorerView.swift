@@ -881,7 +881,10 @@ struct MetricDetailView: View {
                 height: NoopMetrics.chartHeight,
                 valueFormat: { fmt($0) },
                 baselineBand: band?.band,
-                baselineCenter: band?.center
+                baselineCenter: band?.center,
+                // Effort ("strain") is plotted 0–100 but read on the chosen scale: the Y axis prints
+                // the same numbers the scrub bubble does.
+                axisScale: metric.key == "strain" ? UnitFormatter.effortValue(1, scale: effortScale) : 1
             )
         } footer: {
             ChartFooter(footerItems(band: band, effectiveRange: effectiveRange,

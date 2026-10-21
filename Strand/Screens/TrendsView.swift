@@ -681,6 +681,8 @@ struct TrendsView: View {
                     tint: StrandPalette.effortColor,
                     higherIsBetter: nil,
                     range: valueRange(strainPts, fallback: 0...100),
+                    // The Y axis prints the same scale as `fmt` (0–21 or 0–100).
+                    axisScale: UnitFormatter.effortValue(1, scale: effortScale),
                     fmt: { UnitFormatter.effortDisplay($0, scale: effortScale) }
                 )
             }
@@ -702,6 +704,7 @@ struct TrendsView: View {
         tint: Color,
         higherIsBetter: Bool?,
         range: ClosedRange<Double>,
+        axisScale: Double = 1,
         fmt: @escaping (Double) -> String
     ) -> some View {
         let pts = series.points
@@ -716,7 +719,8 @@ struct TrendsView: View {
                 if pts.count >= 2 {
                     glowChart(points: pts, gradient: gradient, valueRange: range,
                               tip: tip, valueFormat: { "\(fmt($0)) \(unit)" },
-                              accessibilityLabel: String(localized: "\(accessibilityTitle) trend"))
+                              accessibilityLabel: String(localized: "\(accessibilityTitle) trend"),
+                              axisScale: axisScale)
                 } else {
                     sparsePlaceholder
                 }
@@ -808,14 +812,14 @@ struct TrendsView: View {
     @ViewBuilder
     private func glowChart(points pts: [TrendPoint], gradient: Gradient, valueRange: ClosedRange<Double>,
                            tip: Color, valueFormat: @escaping (Double) -> String,
-                           accessibilityLabel: String) -> some View {
+                           accessibilityLabel: String, axisScale: Double = 1) -> some View {
         // One crisp, interactive line + area — flat, no blurred glow copy underneath (WHOOP language).
         // The "now" end-cap is drawn INSIDE this chart (nowCapColor) so it's mapped by the chart's own
         // scales and lands on the line — the previous sibling overlay guessed the plot insets and
         // floated the dot left/below the curve (#458).
         TrendChart(points: pts, gradient: gradient, valueRange: valueRange,
                    showsArea: true, height: NoopMetrics.chartHeight, valueFormat: valueFormat,
-                   accessibilityLabel: accessibilityLabel, nowCapColor: tip)
+                   accessibilityLabel: accessibilityLabel, nowCapColor: tip, axisScale: axisScale)
     }
 
     private var sparsePlaceholder: some View {

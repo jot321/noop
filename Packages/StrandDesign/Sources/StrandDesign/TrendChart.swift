@@ -57,6 +57,11 @@ public struct TrendChart: View {
     public var baselineCenter: Double?
     /// Draw the ringed dot on the newest point.
     public var showsLastPoint: Bool
+    /// Multiplier from a plotted value to the number the Y axis prints, e.g. 0.21 for Effort plotted
+    /// on its stored 0–100 scale but read on WHOOP's 0–21 scale. With 1 (the default) the axis is
+    /// Swift Charts' own; otherwise ticks land on round numbers of the printed scale (`axisTicks`).
+    /// Without it the Effort axis printed 25/50/75 under a scrub bubble reading "10.5".
+    public var axisScale: Double
 
     /// One-line VoiceOver summary (count + mean + range), built once in `init`.
     private let a11ySummary: String
@@ -87,6 +92,7 @@ public struct TrendChart: View {
         baselineBand: ClosedRange<Double>? = nil,
         baselineCenter: Double? = nil,
         showsLastPoint: Bool = true,
+        axisScale: Double = 1,
         previewSelectedIndex: Int? = nil
     ) {
         let sorted = points.sorted { $0.date < $1.date }
@@ -104,6 +110,7 @@ public struct TrendChart: View {
         self.baselineBand = baselineBand
         self.baselineCenter = baselineCenter
         self.showsLastPoint = showsLastPoint
+        self.axisScale = axisScale
         // Screenshot/preview hook: start with a point selected so the scrub bubble can be checked.
         if let i = previewSelectedIndex, sorted.indices.contains(i) { _selected = State(initialValue: sorted[i]) }
 
@@ -147,6 +154,28 @@ public struct TrendChart: View {
             out.append(sorted[i - 1].date.addingTimeInterval(deltas[i - 1] / 2))
         }
         return out
+    }
+
+    /// Y-axis tick positions (in plotted units) that print as round numbers once multiplied by
+    /// `scale`: the largest 1/2/5 step that still gives `desiredCount` ticks inside `domain`. Pure.
+    public static func axisTicks(domain: ClosedRange<Double>, scale: Double, desiredCount: Int) -> [Double] {
+        let lo = domain.lowerBound * scale, hi = domain.upperBound * scale
+        guard scale > 0, hi > lo, desiredCount > 0 else { return [] }
+        let mag = pow(10, (log10(hi - lo)).rounded(.down))
+        let steps = [10, 5, 2, 1, 0.5, 0.2, 0.1].map { $0 * mag }
+        for step in steps {
+            let first = (lo / step).rounded(.up), last = (hi / step).rounded(.down)
+            guard last - first + 1 >= Double(desiredCount) else { continue }
+            return stride(from: first, through: last, by: 1).map { $0 * step / scale }
+        }
+        return []
+    }
+
+    /// The printed label for a tick at plotted value `v`: whole numbers when the step allows.
+    static func axisLabel(_ v: Double, scale: Double) -> String {
+        let shown = v * scale
+        let rounded = shown.rounded()
+        return abs(shown - rounded) < 1e-6 ? String(Int(rounded)) : String(format: "%.1f", shown)
     }
 
     /// The selected point while scrubbing (pointer hover or press-and-drag).
@@ -234,10 +263,24 @@ public struct TrendChart: View {
             }
         }
         .chartYAxis {
-            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
-                    .foregroundStyle(StrandPalette.hairlineStrong)
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary).font(StrandFont.footnote)
+            if axisScale == 1 {
+                AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { _ in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                        .foregroundStyle(StrandPalette.hairlineStrong)
+                    AxisValueLabel().foregroundStyle(StrandPalette.textTertiary).font(StrandFont.footnote)
+                }
+            } else {
+                AxisMarks(position: .trailing,
+                          values: Self.axisTicks(domain: resolvedYDomain, scale: axisScale, desiredCount: 3)) { value in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                        .foregroundStyle(StrandPalette.hairlineStrong)
+                    AxisValueLabel {
+                        if let v = value.as(Double.self) {
+                            Text(Self.axisLabel(v, scale: axisScale))
+                                .foregroundStyle(StrandPalette.textTertiary).font(StrandFont.footnote)
+                        }
+                    }
+                }
             }
         }
         .chartOverlay { proxy in
