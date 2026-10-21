@@ -36,6 +36,7 @@ struct LiquidTodayView: View {
     @State private var vitalityDay: String?
     /// Today's logical day key; a change (04:00 rollover seen on foreground or at midnight) reloads.
     @State private var logicalToday = Repository.logicalDayKey(Date())
+    @State private var cachedChargeCalibration: (n: Int, seed: Int)?
     @Environment(\.scenePhase) private var scenePhase
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
@@ -63,7 +64,6 @@ struct LiquidTodayView: View {
     @State private var showCustomise = false
     @State private var showSettings = false
     @State private var showSupport = false
-    @State private var synthesisExpanded = false
     @State private var showLiveSession = false
 
     /// Live Sessions (silent guardian) beta gate — the SAME key the Settings toggle writes. Default ON
@@ -134,7 +134,10 @@ struct LiquidTodayView: View {
     /// an opaque state. nil once Charge exists (the pill reads "Solid") or no usable HRV night exists
     /// yet (still "Calibrating", 0 of N). Since HRV needs the R22 R-R stream, this clock only advances
     /// once R22 is enabled — exactly the confusion the count resolves ("field hasn't come / is it broken?").
-    private var chargeCalibration: (n: Int, seed: Int)? {
+    /// Resolved in load(): it scans every day, and the verdict reads it on each body pass.
+    private var chargeCalibration: (n: Int, seed: Int)? { cachedChargeCalibration }
+
+    private func resolveChargeCalibration() -> (n: Int, seed: Int)? {
         guard displayDay?.recovery == nil else { return nil }
         let upTo = displayDay?.day
         let hrv: [Double?] = repo.days
@@ -362,8 +365,9 @@ struct LiquidTodayView: View {
     /// repository + day reload; `pull.finishRefreshing()` clears the spinner when the reload settles.
     private func fireRefresh() {
         Task { @MainActor in
+            // refresh() bumps refreshSeq when anything changed, which re-runs load() through the task;
+            // calling load() here as well loaded the day twice.
             await repo.refresh()
-            await load()
             try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"
             pull.finishRefreshing()
         }
@@ -674,112 +678,6 @@ struct LiquidTodayView: View {
         .buttonStyle(LiquidPressStyle())
     }
 
-    // MARK: - Synthesis (greeting + readiness pills + one-liner)
-
-    private var synthesisSection: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text(greeting).font(StrandFont.rounded(19)).foregroundStyle(StrandPalette.textPrimary)
-                    .lineLimit(1).minimumScaleFactor(0.6)   // yield to the pills rather than push them to wrap
-                Spacer(minLength: 8)
-                HStack(spacing: 8) {
-                    if let word = readinessWord {
-                        Text(word)
-                            .font(StrandFont.caption.weight(.bold))
-                            .foregroundStyle(StrandPalette.chargeColor)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(StrandPalette.chargeColor.opacity(0.14))
-                                .overlay(Capsule().strokeBorder(StrandPalette.chargeColor.opacity(0.3), lineWidth: 1)))
-                    }
-                    HStack(spacing: 5) {
-                        Circle().fill(StrandPalette.chargeColor).frame(width: 6, height: 6)
-                        Text(chargeStatusText)
-                            .font(StrandFont.caption.weight(.bold))
-                            .foregroundStyle(StrandPalette.chargeColor)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().strokeBorder(StrandPalette.chargeColor.opacity(0.3), lineWidth: 1))
-                }
-                .fixedSize(horizontal: true, vertical: false)   // pills keep their natural width — no "Calibrating" wrap
-            }
-            .padding(.horizontal, 2)
-            .padding(.top, 4)
-
-            Button { withAnimation(.easeInOut(duration: 0.2)) { synthesisExpanded.toggle() } } label: {
-                card {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("SYNTHESIS").font(StrandFont.overline).tracking(1.6)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                            Spacer()
-                            Text(synthesisExpanded ? "hide" : "show").font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                        }
-                        Text(synthLine).font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if synthesisExpanded {
-                            Text(readiness.summary).font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-            }
-            .buttonStyle(LiquidPressStyle())
-
-            // While Charge is still cold-starting, a concrete "N more nights" note so a missing Charge
-            // reads as "still warming up" rather than "broken" (WS-3c).
-            if let note = chargeCalibrationNote {
-                HStack(spacing: 6) {
-                    Image(systemName: "hourglass").font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(StrandPalette.chargeColor)
-                    Text(note).font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 2)
-            }
-        }
-    }
-
-    // MARK: - Recovery vitals
-
-    private var recoveryVitalsSection: some View {
-        // PER-FIELD, today-first carry: each vital reads today's own value, else falls back to the prior
-        // day that recorded it (`vitalsDay`). Coalesce ONCE so the number and its fill fraction agree.
-        let hrv = displayDay?.avgHrv ?? vitalsDay?.avgHrv
-        let rhr = (displayDay?.restingHr ?? vitalsDay?.restingHr).map(Double.init)
-        let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm
-        return card {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("RECOVERY VITALS").font(StrandFont.overline).tracking(1.6)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                    Spacer()
-                    if let line = vitalsProvenanceLine {
-                        Text(line).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                    }
-                }
-                vitalRow("Heart-rate variability", unitText(hrv, "ms"),
-                         StrandPalette.metricCyan, fracOver(hrv, 120))
-                vitalRow("Resting heart rate", unitText(rhr, "bpm"),
-                         StrandPalette.metricRose, fracOver(rhr, 100))
-                vitalRow("Breaths per minute", unitText(resp, "rpm", decimals: 1),
-                         StrandPalette.accent, fracOver(resp, 24))
-            }
-        }
-    }
-
-    private func vitalRow(_ label: String, _ value: String, _ tint: Color, _ frac: Double?) -> some View {
-        HStack(spacing: 12) {
-            LiquidVessel(value: frac, tint: tint, animated: false).frame(width: 26, height: 26)
-            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-            Spacer()
-            Text(value).font(StrandFont.number(15)).foregroundStyle(StrandPalette.textPrimary)
-        }
-    }
-
     // MARK: - Key metrics grid
 
     private var keyMetricsSection: some View {
@@ -1033,6 +931,7 @@ struct LiquidTodayView: View {
         let day = resolveDisplayDay()
         cachedDisplayDay = day
         cachedReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day)
+        cachedChargeCalibration = resolveChargeCalibration()
         // Prior-day vitals carry, resolved ONCE here (never in body). Bound to today's own key so it can't
         // echo today's still-forming row; only on today (a past day's own row is the whole story).
         let tkey = cachedDisplayDay?.day ?? selectedDayKey
@@ -1154,17 +1053,7 @@ struct LiquidTodayView: View {
         }
     }
 
-    private var greeting: String {
-        let h = Calendar.current.component(.hour, from: Date())
-        return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"
-    }
-
     private var stepCount: Double? { displayDay?.steps.map(Double.init) ?? stepsEst }
-
-    private var liveHour: Double {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
-        return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
-    }
 
     // MARK: - Formatting
 
@@ -1220,21 +1109,6 @@ struct LiquidTodayView: View {
         Self.dateLineFormatter.string(from: selectedLogicalDay)
     }
 
-    /// Provenance caption for the recovery-vitals card, keyed on the row a vital actually came from — NOT a
-    /// hardcoded "yesterday". If ANY shown vital fell back to `vitalsDay` (today's own value is nil and the
-    /// carried row supplies it), it stamps that row's date via the shared `TodayView.carriedCaption`, so a
-    /// genuine post-rollover carry reads "Last night · <date>" and a weeks-old carry relabels to
-    /// "Latest sleep · <date>" (#779) instead of a false "Last night". When every shown vital is today's
-    /// own (or there's nothing to carry), it returns nil — the card must not claim "Last night" at all.
-    private var vitalsProvenanceLine: String? {
-        guard let carried = vitalsDay else { return nil }
-        let carriedHrv = displayDay?.avgHrv == nil && carried.avgHrv != nil
-        let carriedRhr = displayDay?.restingHr == nil && carried.restingHr != nil
-        let carriedResp = displayDay?.respRateBpm == nil && carried.respRateBpm != nil
-        guard carriedHrv || carriedRhr || carriedResp else { return nil }
-        return TodayView.carriedCaption(priorDayKey: carried.day,
-                                        todayKey: displayDay?.day ?? selectedDayKey)
-    }
 }
 
 /// Carries the Today scroll's top overscroll offset up to the view for the custom liquid pull-to-refresh.
@@ -1314,128 +1188,7 @@ private struct LiquidRefreshIndicator: View {
 
 // MARK: - NOOP wordmark (centred, with a tap easter egg)
 
-/// The subtle NOOP wordmark. Built as a row of letters (not `Text(...).tracking()`, which adds a
-/// trailing gap after the last glyph and pushes the word off-centre), so it sits DEAD centre. Tap it
-/// for a little easter egg: it plays one of several random one-shot animations — wiggle, shake, flip,
-/// spin, bounce, or a jelly squash — with a light haptic.
-private struct LiquidWordmark: View {
-    @State private var rot = 0.0      // z-rotation (wiggle / spin)
-    @State private var scaleX = 1.0   // horizontal scale (jelly squash)
-    @State private var scaleY = 1.0   // vertical scale (bounce / jelly)
-    @State private var dx = 0.0       // horizontal offset (shake)
-    @State private var flip = 0.0     // y-axis 3D flip
-    @State private var token = 0      // drives the tap haptic
-
-    var body: some View {
-        HStack(spacing: 14) {
-            ForEach(Array("NOOP".enumerated()), id: \.offset) { _, ch in
-                Text(String(ch))
-                    .font(StrandFont.rounded(16, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-        }
-        .shadow(color: .black.opacity(0.25), radius: 6, y: 1)
-        .rotationEffect(.degrees(rot))
-        .scaleEffect(x: scaleX, y: scaleY)
-        .offset(x: dx)
-        .rotation3DEffect(.degrees(flip), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
-        .contentShape(Rectangle())
-        .onTapGesture { playRandomEgg() }
-        .liquidTapHaptic(trigger: token)
-        .frame(maxWidth: .infinity)
-        .accessibilityHidden(true)
-    }
-
-    /// The easter egg: one of several one-shot animations at random. The oscillating ones (wiggle/shake/
-    /// squash) kick the value to an extreme then let an under-damped spring settle it back through zero,
-    /// which reads as a natural wobble without hand-authored keyframes.
-    private func playRandomEgg() {
-        token &+= 1
-        switch Int.random(in: 0..<6) {
-        case 0: // wiggle
-            rot = -14
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.28)) { rot = 0 }
-        case 1: // shake
-            dx = -12
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.26)) { dx = 0 }
-        case 2: // flip
-            withAnimation(.easeInOut(duration: 0.6)) { flip += 360 }
-        case 3: // spin
-            withAnimation(.easeInOut(duration: 0.55)) { rot += 360 }
-        case 4: // bounce
-            scaleX = 1.28; scaleY = 1.28
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.42)) { scaleX = 1; scaleY = 1 }
-        default: // jelly (squash + stretch)
-            scaleX = 1.35; scaleY = 0.7
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.3)) { scaleX = 1; scaleY = 1 }
-        }
-    }
-}
-
 // MARK: - Hero score cell (count-up number over a filling vessel, tap-to-splash)
-
-/// One of the three hero scores (Charge / Effort / Rest). The vessel fills from empty and the number
-/// COUNTS UP to the value when data lands; tapping the gauge itself splashes (the number is
-/// hit-transparent so the tap reaches the vessel). The label row taps through to the scoring guide.
-private struct HeroScoreCell: View {
-    let label: String
-    let score: Double?            // 0–100 (nil = no data yet)
-    let tint: Color
-    let pill: String?
-    let animated: Bool
-    let onGuide: () -> Void
-
-    @State private var shown: Double = 0
-
-    private var frac: Double? { score.map { max(0, min(1, $0 / 100)) } }
-
-    var body: some View {
-        VStack(spacing: 7) {
-            ZStack {
-                LiquidVessel(value: frac, tint: tint, animated: animated)
-                    .frame(width: 96, height: 96)
-                Group {
-                    if score != nil {
-                        CountUpNumber(value: shown, font: StrandFont.rounded(26))
-                    } else {
-                        Text("–").font(StrandFont.rounded(26))
-                    }
-                }
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .allowsHitTesting(false)   // taps fall through to the vessel → splash
-            }
-            Button(action: onGuide) {
-                HStack(spacing: 3) {
-                    Text(label.uppercased()).font(StrandFont.overline).tracking(1.6)
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).opacity(0.6)
-                }
-                .foregroundStyle(StrandPalette.textSecondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text("\(label), \(score.map { String(Int($0.rounded())) } ?? "no data yet"). See how it is scored."))
-            if let pill {
-                Text(pill)
-                    .font(StrandFont.overlineScaled(8.5)).tracking(1.2)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .padding(.horizontal, 8).padding(.vertical, 2.5)
-                    .background(Capsule().strokeBorder(StrandPalette.hairlineStrong, lineWidth: 0.5))
-            } else {
-                Color.clear.frame(height: 18) // keep the three labels vertically aligned
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .onAppear { rollTo(score) }
-        .onChangeCompat(of: score) { v in rollTo(v) }
-    }
-
-    private func rollTo(_ v: Double?) {
-        guard let v else { shown = 0; return }
-        withAnimation(.easeOut(duration: 0.9)) { shown = v }   // counts up in step with the vessel filling
-    }
-}
 
 
 // MARK: - Scene controls (LiveState-isolated leaves)
