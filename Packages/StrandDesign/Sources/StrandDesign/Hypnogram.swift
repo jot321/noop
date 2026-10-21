@@ -176,7 +176,7 @@ public struct Hypnogram: View {
                                 let dimmed = hoverIndex != nil && hoverIndex != idx
                                 // Design Reset (WHOOP): NO REM bloom — every stage band is a flat, crisp
                                 // solid pill; fill-contrast (not a glow) separates the four stages.
-                                RoundedRectangle(cornerRadius: min(3, rect.height / 2), style: .continuous)
+                                RoundedRectangle(cornerRadius: min(3, rect.height / 2, rect.width / 2), style: .continuous)
                                     .fill(color)
                                     .frame(width: rect.width, height: rect.height)
                                     .opacity(dimmed ? 0.45 : 1.0)
@@ -294,10 +294,10 @@ public struct Hypnogram: View {
         // Row-proportional thickness (floored) so bands fill the tall row gaps.
         let rowStep = size.height / CGFloat(rowCount)
         let thickness = max(NoopMetrics.hypnogramBandMinThickness, rowStep * 0.55)
-        // Width is the interval's real duration (floored at 3pt so a brief stage stays visible); the
-        // old floor at the band thickness made short blips read longer than they were.
+        // Width is the interval's real duration, floored at 1.5pt so a brief stage stays visible as a
+        // tick. A 3pt floor drew a 30-second wake as about four minutes on a phone-width night.
         let mid = (x0 + x1) / 2
-        let width = max(3, x1 - x0)
+        let width = max(1.5, x1 - x0)
         let y = rowY(interval.stage.bandRank, in: size.height)
         return CGRect(x: mid - width / 2, y: y - thickness / 2, width: width, height: thickness)
     }
