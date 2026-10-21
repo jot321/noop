@@ -429,13 +429,15 @@ struct MetricDetailView: View {
     @State private var others: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
     @State private var loaded = false
 
-    /// Cached correlation scan, keyed by its inputs (selected range + the metric id),
+    /// Cached correlation scan, keyed by its inputs (metric id + selected range + data generation),
     /// so the full cross-catalog Pearson sweep runs ONLY when those change — not on
     /// every body re-eval (hover / 1 Hz HR ticks / animation). Recomputed from
     /// `recomputeCorrelations(...)` after load and on range change.
     @State private var correlationCache: [CorrRow] = []
     /// The (metricID, range) the cache was built for; nil means "not yet computed".
     @State private var correlationKey: String? = nil
+    /// Bumped each time `load()` replaces the series, so the correlation cache can't outlive the data.
+    @State private var dataGeneration = 0
     private var loadTaskID: String { "\(metric.id)|\(repo.refreshSeq)" }
 
     // MARK: Derived
@@ -646,6 +648,7 @@ struct MetricDetailView: View {
             if !s.isEmpty { loadedOthers.append((other, s)) }
         }
         others = loadedOthers
+        dataGeneration += 1
         loaded = true
         // #943 selection seam: a locked default (.month with under a week of history) no longer
         // OVERWRITES @State range - it renders through `coercedSelection` instead (non-destructive,
@@ -980,10 +983,16 @@ struct MetricDetailView: View {
     }
 
     /// Rebuild the cached correlation scan for the CURRENT effective window, but only
-    /// when its key (metric id + selected range) actually changed — so re-evals that
-    /// don't alter the inputs (hover / HR ticks) are no-ops.
+    /// when its key (metric id + selected range + data generation) actually changed — so
+    /// re-evals that don't alter the inputs (hover / HR ticks) are no-ops.
+    /// The correlation cache key: metric, range AND the load generation. Without the generation a
+    /// refresh that brought new data kept the old "What correlates" rows (the key never changed).
+    static func correlationCacheKey(metricID: String, range: ExploreRange, dataGeneration: Int) -> String {
+        "\(metricID)|\(range.rawValue)|\(dataGeneration)"
+    }
+
     private func recomputeCorrelations() {
-        let key = "\(metric.id)|\(range.rawValue)"
+        let key = Self.correlationCacheKey(metricID: metric.id, range: range, dataGeneration: dataGeneration)
         guard correlationKey != key else { return }
         correlationKey = key
         correlationCache = computeCorrelationRows(windowed: slice(for: effectiveRange))

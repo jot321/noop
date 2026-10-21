@@ -451,14 +451,26 @@ struct CompareView: View {
     }
 
     /// A stable fingerprint of the inputs the correlation scan depends on: the
-    /// non-empty series (in order) and their windowed content. Row content only
-    /// changes when `selected`, `range`, or fetched `fullSeries` change, so this
-    /// covers every case that alters the scan result. Used to invalidate `pairCache`.
+    /// non-empty series (in order) and their windowed content, values included
+    /// (`seriesKey`). Used to invalidate `pairCache`.
     private func correlationKey(_ series: [CompareSeries]) -> String {
         series
             .filter { !$0.rows.isEmpty }
-            .map { s in "\(s.id):\(s.rows.count):\(s.rows.first?.day ?? "")>\(s.rows.last?.day ?? "")" }
+            .map { Self.seriesKey(id: $0.id, rows: $0.rows) }
             .joined(separator: "|")
+    }
+
+    /// Cache key for one windowed series: id, count, endpoints AND a hash of every (day, value).
+    /// Count and endpoints alone missed a day re-scored inside the window, so the correlation and
+    /// overlay caches kept the old numbers after a sync. Hashing is O(rows), the same order as the
+    /// slicing that builds `activeSeries` on each body evaluation.
+    static func seriesKey(id: String, rows: [(day: String, value: Double)]) -> String {
+        var h = Hasher()
+        for r in rows {
+            h.combine(r.day)
+            h.combine(r.value)
+        }
+        return "\(id):\(rows.count):\(rows.first?.day ?? "")>\(rows.last?.day ?? ""):\(h.finalize())"
     }
 
     /// Cached accessor used by the body. Returns the memoized scan when the inputs
@@ -841,11 +853,10 @@ private struct OverlayChart: View {
     }
 
     /// Fingerprint of the model's inputs, same idiom as `CompareView.correlationKey`:
-    /// series id + windowed row count + endpoint days. Row content only changes when
-    /// the selection, range, or fetched history changes, so this covers every input.
+    /// one `CompareView.seriesKey` per series, which hashes every windowed value.
     private var modelKey: String {
         series
-            .map { s in "\(s.id):\(s.rows.count):\(s.rows.first?.day ?? "")>\(s.rows.last?.day ?? "")" }
+            .map { CompareView.seriesKey(id: $0.id, rows: $0.rows) }
             .joined(separator: "|")
     }
 

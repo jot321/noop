@@ -301,10 +301,10 @@ struct TrendsView: View {
             TrendsReportSheet(days: repo.days)
         }
         // #732 — load the resolved sleep_performance series so Rest plots the SAME composite the Today
-        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
-        // count so a newly-banked/-scored night refreshes Rest reactively, like the other metrics that
-        // read `repo.days` directly (and like the Android LaunchedEffect(days) twin).
-        .task(id: repo.days.count) {
+        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on
+        // `refreshSeq`, which bumps whenever the merged history changes: the day COUNT missed a night
+        // re-scored in place, so Rest kept the old value (2026-10-21).
+        .task(id: repo.refreshSeq) {
             let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
             sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         }
