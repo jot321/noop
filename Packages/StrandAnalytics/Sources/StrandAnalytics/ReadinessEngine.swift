@@ -127,14 +127,17 @@ public enum ReadinessEngine {
                              summary: "Wear the strap for a few nights and your readiness read will appear here.",
                              signals: [], acwr: nil, monotony: nil)
         }
-        let history = sorted.filter { $0.day < latest.day }   // everything before today
+        // Calendar windows ending on the judged day (2026-10-21): the last 30 days before it, never later
+        // rows and never months-old nights reached by counting rows across a gap.
+        let baselineStart = WeeklyDigestEngine.addDays(latest.day, -baselineWindow)
+        let history = sorted.filter { $0.day < latest.day && $0.day >= baselineStart }
 
         var signals: [Signal] = []
 
         // HRV readiness ------------------------------------------------------
         let hrvSignal = zSignal(
             value: latest.avgHrv,
-            baseline: history.suffix(baselineWindow).compactMap { $0.avgHrv },
+            baseline: history.compactMap { $0.avgHrv },
             key: "hrv", label: "HRV",
             unit: "ms",
             decimals: 0,
@@ -148,7 +151,7 @@ public enum ReadinessEngine {
         // Resting-HR drift ---------------------------------------------------
         let rhrSignal = zSignal(
             value: latest.restingHr.map(Double.init),
-            baseline: history.suffix(baselineWindow).compactMap { $0.restingHr.map(Double.init) },
+            baseline: history.compactMap { $0.restingHr.map(Double.init) },
             key: "rhr", label: "Resting HR",
             unit: "bpm",
             decimals: 0,
@@ -165,7 +168,7 @@ public enum ReadinessEngine {
         // use wider resp-only z thresholds (WATCH 1.5 / BAD 2.0) than HRV/RHR so a single noisy night
         // can't flip RUNDOWN. Mirrors the Kotlin reference (#78) for cross-platform parity.
         if let rr = latest.respRateBpm, SleepStager.respPlausibleRangeBpm.contains(rr) {
-            let base = history.suffix(baselineWindow).compactMap { $0.respRateBpm }
+            let base = history.compactMap { $0.respRateBpm }
             if base.count >= minBaseline, let m = mean(base),
                SleepStager.respPlausibleRangeBpm.contains(m), let sd = sampleSD(base), sd > 0 {
                 let z = (rr - m) / sd
@@ -182,19 +185,24 @@ public enum ReadinessEngine {
         }
 
         // Training Stress Balance (ACWR) + monotony --------------------------
-        let strainSeries = sorted.compactMap { $0.strain }
+        // Load over the last 7 and 28 calendar days up to and including the judged day.
+        let acuteStart = WeeklyDigestEngine.addDays(latest.day, -(acuteWindow - 1))
+        let chronicStart = WeeklyDigestEngine.addDays(latest.day, -(chronicWindow - 1))
+        let chronicRows = sorted.filter { $0.day >= chronicStart && $0.day <= latest.day }
+        let strainSeries = chronicRows.compactMap { $0.strain }
+        let acuteSeries = chronicRows.filter { $0.day >= acuteStart }.compactMap { $0.strain }
         var acwr: Double? = nil
         var monotony: Double? = nil
-        if strainSeries.count >= minChronic {
-            let acute = mean(Array(strainSeries.suffix(acuteWindow)))!
-            let chronic = mean(Array(strainSeries.suffix(chronicWindow)))!
+        if strainSeries.count >= minChronic, !acuteSeries.isEmpty {
+            let acute = mean(acuteSeries)!
+            let chronic = mean(strainSeries)!
             if chronic > 0 {
                 let ratio = acute / chronic
                 acwr = ratio
                 signals.append(acwrSignal(ratio, acute: acute, chronic: chronic))
             }
             // Foster monotony over the last week of strain.
-            let week = Array(strainSeries.suffix(acuteWindow))
+            let week = acuteSeries
             if week.count >= 4, let sd = sampleSD(week), sd > 0, let m = mean(week) {
                 let mono = m / sd
                 monotony = mono

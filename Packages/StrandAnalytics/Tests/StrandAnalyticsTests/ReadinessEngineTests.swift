@@ -83,4 +83,34 @@ final class ReadinessEngineTests: XCTestCase {
         XCTAssertNil(ReadinessEngine.sampleSD([5]))
         XCTAssertNil(ReadinessEngine.mean([]))
     }
+
+    // MARK: - Calendar windows (2026-10-21): a gap in the data is a gap, not more history
+
+    private func day(_ key: String, hrv: Double?, rhr: Int?, strain: Double?) -> DailyMetric {
+        DailyMetric(day: key, totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil, lightMin: nil,
+                    disturbances: nil, restingHr: rhr, avgHrv: hrv, recovery: nil, strain: strain,
+                    exerciseCount: nil, spo2Pct: nil, skinTempDevC: nil, respRateBpm: nil)
+    }
+
+    func testBaselineIgnoresNightsOlderThanThirtyDays() {
+        // 28 nights in March, nothing since, then a night in June: no HRV/RHR baseline exists for it.
+        var days = (1...28).map { day(String(format: "2024-03-%02d", $0), hrv: $0 % 2 == 0 ? 62 : 58,
+                                       rhr: $0 % 2 == 0 ? 54 : 50, strain: 10) }
+        days.append(day("2024-06-20", hrv: 75, rhr: 45, strain: 10))
+        let r = ReadinessEngine.evaluate(days: days, today: "2024-06-20")
+        XCTAssertNil(r.signals.first { $0.key == "hrv" }, "March nights are not a 30-day baseline for June")
+        XCTAssertNil(r.signals.first { $0.key == "acwr" }, "no strain in the last 28 days")
+    }
+
+    func testLaterDaysNeverShapeAnEarlierVerdict() {
+        // Evaluating 14 March must not read 15–28 March (they hadn't happened yet).
+        let base = baseline(todayHrv: 60, todayRhr: 52, todayStrain: 10)
+        var withFuture = base
+        withFuture.append(contentsOf: (1...10).map { day(String(format: "2024-04-%02d", $0), hrv: 90, rhr: 40, strain: 30) })
+        let a = ReadinessEngine.evaluate(days: base, today: "2024-03-14")
+        let b = ReadinessEngine.evaluate(days: withFuture, today: "2024-03-14")
+        XCTAssertEqual(a.level, b.level)
+        XCTAssertEqual(a.acwr, b.acwr)
+        XCTAssertEqual(a.signals.map(\.evidence), b.signals.map(\.evidence))
+    }
 }
