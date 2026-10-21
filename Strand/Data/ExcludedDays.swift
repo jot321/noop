@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 
 // MARK: - Excluded days (2026-10-21)
 //
@@ -51,6 +52,21 @@ enum ExcludedDays {
     static func applyLaunchArguments(_ arguments: [String] = ProcessInfo.processInfo.arguments,
                                      _ defaults: UserDefaults = .standard) -> Bool {
         add(launchDays(arguments), defaults)
+    }
+
+    /// How many days a rescore must cover after `touched` days were added or removed: from the oldest
+    /// of them to today (plus a day of slack), so every later day is rescored against the corrected
+    /// baseline. Never below the usual 21-day pass, never past the 4000-day full history. The Settings
+    /// screen and the `--exclude-days` launch path both use it, so a launch exclusion of a day months
+    /// back is not rescored at 21 days and missed. (Audit I2, 2026-10-21.)
+    static func rescoreSpan(touched: Set<String>, todayIdx: Int = currentDayIndex()) -> Int {
+        guard let oldest = touched.compactMap(Baselines.dayIndex).min() else { return 21 }
+        return min(4000, max(21, todayIdx - oldest + 2))
+    }
+
+    /// Today's local day as days since 1970-01-01, the index `rescoreSpan` counts back from.
+    static func currentDayIndex(_ now: Date = Date(), _ tz: TimeZone = .current) -> Int {
+        Int(now.timeIntervalSince1970 + Double(tz.secondsFromGMT(for: now))) / 86_400
     }
 
     /// A real calendar date in "yyyy-MM-dd" form.

@@ -32,12 +32,21 @@ final class IntelligenceEngine: ObservableObject {
     /// dropped, so a freshly-synced night intermittently never gets re-scored until the next cycle and Today
     /// falls back to the last scored day. Instead the dropped force sets this flag; the in-flight pass's
     /// `defer` re-invokes `analyzeRecent(force: true)` ONCE when it clears. A single re-arm (the flag is
-    /// cleared BEFORE the re-invoke) bounds it to one extra pass , no recompute storm.
-    private var pendingForcedRescore = false
+    /// cleared BEFORE the re-invoke) bounds it to one extra pass , no recompute storm. Holds the WIDEST
+    /// `maxDays` asked for while the pass ran (nil = nothing pending): a dropped "Bring back" for a day
+    /// 400 days ago must re-run at 400, not at the in-flight pass's 21, or that day is never rescored.
+    /// (Audit I2, 2026-10-21.)
+    private var pendingForcedRescoreDays: Int?
     /// #899 heal bound: true while the last heal already re-armed a rescore, so a heal firing again on
     /// the very next pass cannot re-arm a second time (the Android twin is hard-bounded to exactly one
     /// re-pass; this mirrors it). Reset by any pass whose heal finds nothing, restoring the budget.
     private var healRearmedThisCycle = false
+    /// The `maxDays` of every pass that took the lock, oldest first, and the most passes ever inside the
+    /// body at once. Cheap bookkeeping that lets tests prove a re-armed rescore runs at the dropped
+    /// request's width (audit I2) and that two calls never interleave their writes (audit I3).
+    private(set) var passWidths: [Int] = []
+    private(set) var peakConcurrentPasses = 0
+    private var activePasses = 0
 
     /// Who supplies the dashboard headline for a By-Day row. The By-Day card always shows NOOP's OWN
     /// on-device numbers, but the WHOLE-DASHBOARD value for the same day can come from an IMPORTED row
@@ -381,7 +390,30 @@ final class IntelligenceEngine: ObservableObject {
         // in-flight pass already covers the same window). But a FORCED call is a real update path (a
         // post-backfill rescore after a sync) , dropping it would leave a freshly-synced night unscored
         // until the next cycle. Re-arm instead: flag it so the running pass's `defer` re-invokes once.
-        guard !computing else { if force { pendingForcedRescore = true }; return }
+        guard !computing else {
+            if force { pendingForcedRescoreDays = Self.rearmDays(pending: pendingForcedRescoreDays, requested: maxDays) }
+            return
+        }
+        // Take the lock BEFORE the first await (audit I3, 2026-10-21). It used to be set only after the
+        // store-handle and fingerprint awaits, so a second call arriving in between also passed the guard
+        // and the two passes interleaved their upserts and window deletes. The `defer` clears it on every
+        // return below, the early ones included.
+        computing = true
+        activePasses += 1
+        peakConcurrentPasses = max(peakConcurrentPasses, activePasses)
+        // #899-A re-arm: clear the lock, then if a forced rescore was dropped while this pass held it,
+        // run it ONCE. The flag is cleared BEFORE the re-invoke (a single re-arm), so a forced call landing
+        // DURING the re-invoke re-arms it again but a quiet one does not , this can never recurse unbounded.
+        // The re-invoke is launched on a fresh `Task` because `defer` is synchronous; by the time it runs
+        // `computing` is already false, so its own `guard !computing` passes and it rescores the new data.
+        defer {
+            computing = false
+            activePasses -= 1
+            if let rerunDays = pendingForcedRescoreDays {
+                pendingForcedRescoreDays = nil
+                Task { await self.analyzeRecent(maxDays: rerunDays, force: true) }
+            }
+        }
         guard let store = await repo.storeHandle() else { note = String(localized: "No on-device store yet."); return }
         guard let hrvCfg = Baselines.metricCfg["hrv"],
               let rhrCfg = Baselines.metricCfg["resting_hr"],
@@ -404,23 +436,7 @@ final class IntelligenceEngine: ObservableObject {
            UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey) == wmKey {
             return
         }
-
-        computing = true
-        // #899-A re-arm: clear the lock, then if a forced rescore was dropped while this pass held it,
-        // run it ONCE. The flag is cleared BEFORE the re-invoke (a single re-arm), so a forced call landing
-        // DURING the re-invoke re-arms it again but a quiet one does not , this can never recurse unbounded.
-        // The re-invoke is launched on a fresh `Task` because `defer` is synchronous; by the time it runs
-        // `computing` is already false, so its own `guard !computing` passes and it rescores the new data.
-        defer {
-            computing = false
-            if pendingForcedRescore {
-                pendingForcedRescore = false
-                // Carry THIS pass's window into the re-pass: a heal firing during a wide one-shot pass
-                // must re-score the same width, not the default 21 days (Kotlin re-passes with the same
-                // maxDays; keep the platforms in lockstep).
-                Task { await self.analyzeRecent(maxDays: maxDays, force: true) }
-            }
-        }
+        passWidths.append(maxDays)
 
         let up = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
                              age: Double(profile.age), sex: profile.sex,
@@ -1474,16 +1490,24 @@ final class IntelligenceEngine: ObservableObject {
             // matching the Android one-re-pass bound; the budget restores once a pass heals nothing.
             if !healRearmedThisCycle {
                 healRearmedThisCycle = true
-                pendingForcedRescore = true
+                // Carry THIS pass's window into the re-pass: a heal firing during a wide one-shot pass
+                // must re-score the same width, not the default 21 days (Kotlin re-passes with the same
+                // maxDays; keep the platforms in lockstep).
+                pendingForcedRescoreDays = Self.rearmDays(pending: pendingForcedRescoreDays, requested: maxDays)
             }
         } else {
             healRearmedThisCycle = false
         }
         // Make re-detection idempotent across runs: clear the prior computed detected workouts in the
         // scored window (a bout's startTs can drift as more HR arrives, which would otherwise orphan
-        // stale rows under the (deviceId,startTs,sport) key), then re-insert.
-        _ = try? await store.deleteWorkouts(deviceId: computedId, sport: "detected",
-                                            from: windowStart, to: now)
+        // stale rows under the (deviceId,startTs,sport) key), then re-insert. Only from the oldest
+        // SCANNED day's midnight: bouts are detected per calendar day, so deleting from the wider
+        // `windowStart` removed the ~30 h before it every pass and never recreated them, and detected
+        // workouts vanished once they were about `maxDays` old. (Audit I1, 2026-10-21.)
+        _ = try? await store.deleteWorkouts(
+            deviceId: computedId, sport: "detected",
+            from: Self.detectedWorkoutReconcileStart(nowLocalMidnight: nowLocalMidnight, maxDays: maxDays),
+            to: now)
         if !workoutRows.isEmpty { _ = try? await store.upsertWorkouts(workoutRows, deviceId: computedId) }
 
         // #137: a manually-started workout is scored from sparse live HR at save time , near-zero
@@ -1505,6 +1529,17 @@ final class IntelligenceEngine: ObservableObject {
         // short-circuit while it's unchanged. Written ONLY here at the end of a completed run (never on an
         // early guard-return), so an interrupted/failed run can't advance the watermark past unscored data.
         if !wmKey.isEmpty { UserDefaults.standard.set(wmKey, forKey: Self.analyzeWatermarkKey) }
+    }
+
+    /// Where a pass may start deleting detected workouts: the local midnight of the oldest day it scans
+    /// (the same bound as the daily-row reconcile), so it only deletes bouts it re-detects.
+    nonisolated static func detectedWorkoutReconcileStart(nowLocalMidnight: Int, maxDays: Int) -> Int {
+        nowLocalMidnight - (max(1, maxDays) - 1) * 86_400
+    }
+
+    /// The width a re-armed rescore runs at: the widest of what is already pending and the new request.
+    nonisolated static func rearmDays(pending: Int?, requested: Int) -> Int {
+        max(pending ?? 0, requested)
     }
 
     /// UserDefaults key for the #836 idle-tick gate: the `(count:maxTs)` HR fingerprint the last completed
@@ -1811,14 +1846,20 @@ final class IntelligenceEngine: ObservableObject {
                           deepMin: agg.deepMin, remMin: agg.remMin, lightMin: agg.lightMin)
     }
 
-    /// True when at least `minSamples` HR samples fall inside the local day [dayStart, dayEnd) itself,
-    /// not merely inside the wider read window around it. (Audit A13.)
-    /// Remove what the engine wrote for excluded days: the computed daily row, every metric-series point
-    /// and the detected sleep sessions that end on the day. Raw strap data and hand-edited sessions stay.
+    /// Remove what the engine wrote for excluded days: the computed daily row, every metric-series point,
+    /// the detected sleep sessions that end on the day and the detected workouts that start on it (an
+    /// excluded day outside the pass window kept its auto-detected bouts, audit I2). Raw strap data,
+    /// hand-edited sessions and manual or imported workouts stay.
     static func purgeExcludedDays(_ days: Set<String>, store: WhoopStore, computedId: String,
                                 offsetSec: Int) async {
         for day in days {
             _ = try? await store.deleteDailyMetrics(deviceId: computedId, from: day, to: day)
+            // Bouts are detected per local calendar day, so the day's own [midnight, next midnight).
+            if let idx = epochDayIndex(day) {
+                let midnight = idx * 86_400 - offsetSec
+                _ = try? await store.deleteWorkouts(deviceId: computedId, sport: "detected",
+                                                    from: midnight, to: midnight + 86_400 - 1)
+            }
         }
         _ = try? await store.deleteAllMetricSeries(deviceId: computedId, days: days)
         // A session's day is its wake day; read from 2 days before the oldest to the day after the newest.
@@ -1838,6 +1879,8 @@ final class IntelligenceEngine: ObservableObject {
             .map(\.startTs)
     }
 
+    /// True when at least `minSamples` HR samples fall inside the local day [dayStart, dayEnd) itself,
+    /// not merely inside the wider read window around it. (Audit A13.)
     nonisolated static func hasOwnData(_ hr: [HRSample], dayStart: Int, dayEnd: Int, minSamples: Int = 200) -> Bool {
         var n = 0
         for s in hr where s.ts >= dayStart && s.ts < dayEnd {

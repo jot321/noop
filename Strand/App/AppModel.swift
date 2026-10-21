@@ -458,9 +458,12 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
             // window get the corrected numbers too. Persisted flag; a no-op on every later launch.
             await self.intelligence.runAuditRescoreIfNeeded()
             // `--exclude-days` on this launch (set from the Mac): add the days and rescore once so their
-            // computed rows go and the baselines refold without them.
+            // computed rows go and the baselines refold without them. Wide enough to reach the oldest
+            // launch day, like the Settings screen; a fixed 21 days left older days scored. (Audit I2.)
             if ExcludedDays.applyLaunchArguments() {
-                await self.intelligence.analyzeRecent()
+                let span = ExcludedDays.rescoreSpan(
+                    touched: Set(ExcludedDays.launchDays(ProcessInfo.processInfo.arguments)))
+                await self.intelligence.analyzeRecent(maxDays: span)
                 await self.repo.refresh()
             }
             while !Task.isCancelled {
