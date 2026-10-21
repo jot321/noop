@@ -91,14 +91,15 @@ public enum ReportMetric: String, CaseIterable, Sendable {
     }
 
     /// Whether a rising/falling move carries a clear good/bad valence. False for a signed
-    /// deviation metric (skin-temp Δ) and for workout count (more or fewer sessions is a
-    /// lifestyle choice, not inherently good/bad) — the report then shows the trend
-    /// direction without a "good sign / worth a look" verdict, and colours the change chip
-    /// neutrally.
+    /// deviation metric (skin-temp Δ), for workout count (more or fewer sessions is a
+    /// lifestyle choice, not inherently good/bad) and for strain (Effort has no better
+    /// direction in the metric catalog: more load is not a good sign by itself) — the report
+    /// then shows the trend direction without a "good sign / worth a look" verdict, and
+    /// colours the change chip neutrally.
     public var framesGoodBad: Bool {
         switch self {
-        case .skinTempDev, .workouts: return false
-        default:                      return true
+        case .skinTempDev, .workouts, .strain: return false
+        default:                               return true
         }
     }
 

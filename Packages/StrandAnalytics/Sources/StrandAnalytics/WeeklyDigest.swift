@@ -67,6 +67,11 @@ public enum WeeklyMetric: String, CaseIterable, Sendable {
         }
     }
 
+    /// Whether a move has a good/bad reading at all. Effort has none: more load is neither good
+    /// nor bad on its own (the metric catalog gives it no better direction), so a rising Effort
+    /// must not read as "a good sign".
+    public var hasBetterDirection: Bool { self != .effort }
+
     /// A coarse "typical day-to-day range" used to normalise week-over-week deltas
     /// so movers on different scales (a 6 ms HRV swing vs a 4 bpm RHR swing) can be
     /// ranked against each other. Deliberately conservative, deterministic constants
@@ -111,10 +116,10 @@ public struct WeeklyMetricSummary: Equatable, Sendable {
     public var wowDelta: Double { weekOverWeek.delta }
 
     /// Direction of the week-over-week change expressed as GOOD / BAD / FLAT,
-    /// folding in `higherIsBetter` (so a RHR rise reads as "worse"). 0 when flat
-    /// or a period is empty.
+    /// folding in `higherIsBetter` (so a RHR rise reads as "worse"). 0 when flat,
+    /// when a period is empty, or for a metric with no better direction (Effort).
     public var wowGoodness: Int {
-        guard weekOverWeek.direction != 0 else { return 0 }
+        guard weekOverWeek.direction != 0, metric.hasBetterDirection else { return 0 }
         let up = weekOverWeek.direction > 0
         let good = (up == metric.higherIsBetter)
         return good ? 1 : -1

@@ -177,6 +177,20 @@ final class WeeklyDigestTests: XCTestCase {
         XCTAssertTrue(line.contains("worth a look"), "RHR rising should read as a caution: \(line)")
     }
 
+    func testEffortRiseCarriesNoVerdict() {
+        // Effort has no better direction: more load is neither good nor bad on its own, so a rise
+        // reads without "a good sign" (2026-10-21).
+        var effort: [String: Double] = [:]
+        for d in 8...14 { effort[String(format: "2026-06-%02d", d)] = 70 }  // this week
+        for d in 1...7  { effort[String(format: "2026-06-%02d", d)] = 40 }  // last week
+        let d = WeeklyDigestEngine.build(byMetric: [.effort: effort], anchorDay: "2026-06-13")
+        let line = d.focalPoints.first ?? ""
+        XCTAssertTrue(line.contains("Effort"), "Expected the Effort mover: \(line)")
+        XCTAssertFalse(line.contains("good sign"), "Effort has no good direction: \(line)")
+        XCTAssertFalse(line.contains("worth a look"), "Effort has no bad direction: \(line)")
+        XCTAssertEqual(d.summary(.effort)?.wowGoodness, 0)
+    }
+
     func testSteadyWeekGivesCalmLine() {
         // Identical values both weeks → no mover, balanced → a single steady line.
         var charge: [String: Double] = [:], effort: [String: Double] = [:], rest: [String: Double] = [:]
