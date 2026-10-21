@@ -9,6 +9,26 @@ final class CompareWindowTests: XCTestCase {
         days.map { (day: String(format: "2026-%02d-%02d", month, $0), value: value($0)) }
     }
 
+    // MARK: R6: windows anchored on today
+
+    func testWeekWindowEndsTodayNotAtTheSeriesLastReading() {
+        // A series that stopped in July: anchored on its own last reading, "7 days" showed July
+        // next to another series' October.
+        let july = rows(7, 17...28)
+        XCTAssertTrue(CompareView.slice(july, days: 7, today: "2026-10-21").isEmpty)
+    }
+
+    func testWeekWindowKeepsTheLastSevenCalendarDays() {
+        let series = rows(7, 17...28) + rows(10, 12...21)
+        let week = CompareView.slice(series, days: 7, today: "2026-10-21")
+        XCTAssertEqual(week.map(\.day), (15...21).map { String(format: "2026-10-%02d", $0) })
+    }
+
+    func testAllIsEverything() {
+        let series = rows(7, 17...28)
+        XCTAssertEqual(CompareView.slice(series, days: nil, today: "2026-10-21").count, 12)
+    }
+
     // MARK: R5: r needs 10 shared days
 
     func testFourSharedDaysAreTooFewForR() {

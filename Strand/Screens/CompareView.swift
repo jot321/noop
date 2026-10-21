@@ -193,15 +193,18 @@ struct CompareView: View {
     private var selectionKey: String { selected.map(\.id).sorted().joined(separator: "|") }
 
     // MARK: - Active windowed series
+    //
+    // Every window ends on today's local day for all series alike (see `slice`).
 
-    /// A full-history series' rows over a given range, taken RELATIVE TO THAT SERIES'
-    /// LATEST data point (not "now"); `.all` returns everything. Compared as day keys: local
-    /// midnights are not 86 400 s apart across a DST change. `today` is not used yet.
+    /// A full-history series' rows over the trailing `days` calendar days ENDING TODAY (the local
+    /// day), the same anchor Trends uses (#23); nil days returns everything. Each series used to
+    /// anchor on its own latest reading, so a "7 days" view put a series that stopped in July next to
+    /// October without a word. Now a stale series' window is empty and auto-widens with the "sparse
+    /// widened" warning. Compared as day keys, so a DST change can't shift the edge.
     static func slice(_ full: [(day: String, value: Double)], days: Int?, today: String) -> [(day: String, value: Double)] {
         guard let n = days else { return full }
-        guard let lastDay = full.last?.day, DayWindow.dayNumber(lastDay) != nil else { return [] }
-        let cutoff = DayWindow.windowStart(endingOn: lastDay, days: n)
-        return full.filter { $0.day >= cutoff }
+        let cutoff = DayWindow.windowStart(endingOn: today, days: n)
+        return full.filter { $0.day >= cutoff && $0.day <= today }
     }
 
     private func slice(_ full: [(day: String, value: Double)], _ r: CompareRange) -> [(day: String, value: Double)] {
