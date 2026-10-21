@@ -6,6 +6,8 @@ import StrandAnalytics
 /// using the WHOOP model shape. Makes the app independent of WHOOP's cloud for live-collected days.
 struct IntelligenceView: View {
     @EnvironmentObject var intelligence: IntelligenceEngine
+    /// Stored daily rows, so the By-Day list covers every scored day, not only the last pass's window.
+    @EnvironmentObject var repo: Repository
     // NOTE: IntelligenceView deliberately does NOT observe `LiveState`. A connected strap publishes at
     // ~1 Hz, which would re-evaluate this body (and its lazy By-Day list) on every tick. The only live
     // dependency — the "Syncing strap history…" note shown over the empty state — owns its OWN
@@ -31,7 +33,10 @@ struct IntelligenceView: View {
                        topBackground: liquidScaffoldSky()) {
             if let f = forecast { forecastCard(f) }
             explainerCard
-            if intelligence.computing {
+            let days = allDays
+            // A pass with rows already on screen keeps them (the lock now flips even for a quick idle-tick
+            // check, so swapping the list for a spinner would flicker); only an empty screen shows it.
+            if intelligence.computing && days.isEmpty {
                 NoopCard(padding: 20, tint: StrandPalette.chargeColor) {
                     HStack(spacing: NoopMetrics.rowSpacing) {
                         ProgressView().controlSize(.small)
@@ -39,7 +44,7 @@ struct IntelligenceView: View {
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
                 }
-            } else if let note = intelligence.note {
+            } else if days.isEmpty, let note = intelligence.note {
                 NoopCard(padding: 20, tint: StrandPalette.chargeColor) {
                     HStack(alignment: .top, spacing: NoopMetrics.rowSpacing) {
                         Image(systemName: "moon.zzz.fill").foregroundStyle(StrandPalette.chargeColor)
@@ -48,7 +53,7 @@ struct IntelligenceView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            } else if intelligence.results.isEmpty {
+            } else if days.isEmpty {
                 // While the strap is mid-offload, say so — "no days" reads as final otherwise (#77). The
                 // note owns the `LiveState` observation in its own leaf so the chunk count ticks without
                 // re-rendering Intelligence (identical output to the prior inline check).
@@ -70,17 +75,21 @@ struct IntelligenceView: View {
                     SegmentedPillControl(IntelRange.allCases, selection: $range) { $0.label }
                 }
                 // Whole-phrase variants per count so translators never see a stitched plural.
-                Text(filtered.count == 1 ? "1 day" : "\(filtered.count) days")
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if filtered.isEmpty {
+                let shown = filtered(days)
+                HStack(spacing: 6) {
+                    Text(shown.count == 1 ? "1 day" : "\(shown.count) days")
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                    if intelligence.computing { ProgressView().controlSize(.mini) }
+                    Spacer(minLength: 0)
+                }
+                if shown.isEmpty {
                     NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
                         Text("No scored days in this window. Widen the range or import more history.")
                             .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } else {
-                    ForEach(Array(filtered.enumerated()), id: \.element.id) { index, day in
+                    ForEach(Array(shown.enumerated()), id: \.element.id) { index, day in
                         dayCard(day)
                             .staggeredAppear(index: index)
                     }
@@ -98,12 +107,17 @@ struct IntelligenceView: View {
         }
     }
 
+    /// Every scored day: the last pass's rows plus the stored history (audit I7).
+    private var allDays: [IntelligenceEngine.Computed] {
+        IntelligenceEngine.byDayRows(results: intelligence.results, stored: repo.vitalRows)
+    }
+
     /// The day list narrowed to the selected window. `nil` cutoff (ALL) shows everything.
-    private var filtered: [IntelligenceEngine.Computed] {
-        guard let n = range.days else { return intelligence.results }
+    private func filtered(_ days: [IntelligenceEngine.Computed]) -> [IntelligenceEngine.Computed] {
+        guard let n = range.days else { return days }
         let date = Calendar.current.date(byAdding: .day, value: -(n - 1), to: Date()) ?? Date()
         let cutoff = Self.dayFmt.string(from: date)
-        return intelligence.results.filter { $0.day >= cutoff }
+        return days.filter { $0.day >= cutoff }
     }
 
     private static let dayFmt: DateFormatter = {
@@ -258,7 +272,7 @@ struct IntelligenceView: View {
                     // A3: the existing per-day Charge confidence as a small dot + tier tag pill
                     // (CALIBRATING / EST. / REL.) next to the source badge. Pure presentation of
                     // `d.confidence` , only shown once there's a Charge to qualify.
-                    if d.recovery != nil {
+                    if d.recovery != nil && !d.fromHistory {
                         ConfidenceTierChip(confidence: d.confidence)
                     }
                     // The REAL source of the day's dashboard headline, not a hard-coded "NOOP-computed".

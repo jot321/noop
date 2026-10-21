@@ -146,10 +146,41 @@ final class IntelligenceEngine: ObservableObject {
         /// (`RecoveryScorer.skinTempRelative`), or nil when no deviation is available. Surfaced as
         /// "+0.3 C vs your normal" with a relative tier tag; never a fake clinical absolute.
         var skinTempRel: SkinTempRelative? = nil
+        /// True for a day read back from a stored row (an earlier pass scored it), which carries the
+        /// numbers but not the drivers or the confidence tier, so the By-Day card hides those.
+        var fromHistory: Bool = false
         /// The night had HRV but no Charge because the HRV baseline went stale over a long gap off the
         /// wrist (audit I4): the card says it is re-learning rather than showing a bare dash.
         var relearning: Bool = false
         var id: String { day }
+    }
+
+    /// The By-Day list for any range: this pass's rows (with drivers and confidence) plus every stored
+    /// day an earlier pass scored, newest first. `results` holds only the last pass's window, so ALL, 1Y,
+    /// 6M and 3M all showed the same couple of days. Stored days are the computed ("-noop") rows and the
+    /// watch-only Apple Health days that carry a Charge, with the same provenance badge the pass gives
+    /// them. Pure. (Audit I7, 2026-10-21.)
+    nonisolated static func byDayRows(results: [Computed], stored: [SourcedDailyMetric]) -> [Computed] {
+        let whoopDays = Set(stored.filter { $0.source == .whoopImport }.map(\.metric.day))
+        let appleDays = Set(stored.filter { $0.source == .appleHealth }.map(\.metric.day))
+        let computedDays = Set(stored.filter { $0.source == .noopComputed }.map(\.metric.day))
+        var byDay: [String: Computed] = [:]
+        for row in stored {
+            let m = row.metric
+            let source: DaySource
+            switch row.source {
+            case .noopComputed:
+                source = DaySource.classify(day: m.day, importedWhoopDays: whoopDays, appleHealthDays: appleDays)
+            case .appleHealth where m.recovery != nil && !computedDays.contains(m.day) && !whoopDays.contains(m.day):
+                source = .appleHealth
+            default:
+                continue
+            }
+            byDay[m.day] = Computed(day: m.day, recovery: m.recovery, strain: m.strain, sleepMin: m.totalSleepMin,
+                                    hrv: m.avgHrv, rhr: m.restingHr, source: source, fromHistory: true)
+        }
+        for r in results { byDay[r.day] = r }
+        return byDay.values.sorted { $0.day > $1.day }
     }
 
     /// Optional sink for the per-day scoring diagnostic, fed line-by-line into the SAME shareable strap
