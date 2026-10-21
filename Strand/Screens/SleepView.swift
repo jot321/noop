@@ -339,8 +339,10 @@ struct SleepView: View {
     @ViewBuilder
     private func restHero(_ model: SleepModel) -> some View {
         let score = model.performance.latest
+        let recent = SleepView.isRecentNight(endTs: model.night.session.endTs)
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sleep performance", overline: "Last night", trailing: String(localized: "Rest"))
+            SectionHeader("Sleep performance", overline: recent ? "Last night" : "Latest night",
+                          trailing: String(localized: "Rest"))
             // A subtle night atmosphere sits behind the sleep hero ONLY (the Rest world's whisper:
             // faint indigo wash + crescent moon over the near-black canvas, no glow), clipped to the
             // card. Replaces the now-flat ScenicHeroBackground here.
@@ -385,7 +387,8 @@ struct SleepView: View {
                             font: StrandFont.number(46),
                             color: StrandPalette.restBright
                         )
-                        Text("asleep last night")
+                        Text(recent ? LocalizedStringKey("asleep last night")
+                                    : LocalizedStringKey("asleep on the latest night"))
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
@@ -1174,18 +1177,19 @@ struct SleepView: View {
     @ViewBuilder
     private func stagesVsTypical(_ model: SleepModel) -> some View {
         let s = model.night.stages
+        let recent = SleepView.isRecentNight(endTs: model.night.session.endTs)
         // Per-stage typical means are computed ONCE in the model build (each a full pass
         // over repo.days) and read here.
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Stages vs typical", overline: "Last night",
+            SectionHeader("Stages vs typical", overline: recent ? "Last night" : "Latest night",
                           trailing: String(localized: "hatch = typical"))
             NoopCard(tint: StrandPalette.restColor) {
                 VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-                    stageRow(stage: String(localized: "Deep"),  last: s.deep,  typical: model.typicalDeepMin,  nightTotal: s.total, color: StrandPalette.sleepDeep)
+                    stageRow(stage: String(localized: "Deep"),  last: s.deep,  typical: model.typicalDeepMin,  nightTotal: s.total, color: StrandPalette.sleepDeep, recent: recent)
                     Divider().overlay(StrandPalette.hairline)
-                    stageRow(stage: String(localized: "REM"),   last: s.rem,   typical: model.typicalRemMin,   nightTotal: s.total, color: StrandPalette.sleepREM)
+                    stageRow(stage: String(localized: "REM"),   last: s.rem,   typical: model.typicalRemMin,   nightTotal: s.total, color: StrandPalette.sleepREM, recent: recent)
                     Divider().overlay(StrandPalette.hairline)
-                    stageRow(stage: String(localized: "Light"), last: s.light, typical: model.typicalLightMin, nightTotal: s.total, color: StrandPalette.sleepLight)
+                    stageRow(stage: String(localized: "Light"), last: s.light, typical: model.typicalLightMin, nightTotal: s.total, color: StrandPalette.sleepLight, recent: recent)
                 }
             }
         }
@@ -1198,7 +1202,8 @@ struct SleepView: View {
     /// Same data as before (`last` minutes, `typical` personal mean) — the hatch just renders the typical
     /// context the prior vertical-only marker implied.
     @ViewBuilder
-    private func stageRow(stage label: String, last: Double, typical: Double?, nightTotal: Double, color: Color) -> some View {
+    private func stageRow(stage label: String, last: Double, typical: Double?, nightTotal: Double, color: Color,
+                          recent: Bool) -> some View {
         // Scale both values against a shared per-row max so the typical hatch + marker are meaningful.
         let scaleMax = max(last, typical ?? 0) * 1.18
         let max = scaleMax > 0 ? scaleMax : 1
@@ -1259,12 +1264,20 @@ struct SleepView: View {
             }
             .frame(height: 12)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(stageRowAccessibilityLabel(label: label, last: last, sharePct: sharePct, typical: typical))
+            .accessibilityLabel(stageRowAccessibilityLabel(label: label, last: last, sharePct: sharePct, typical: typical,
+                                                           recent: recent))
         }
     }
 
     /// Whole-string VoiceOver label for a stage row: one key per variant, never a stitched tail fragment.
-    private func stageRowAccessibilityLabel(label: String, last: Double, sharePct: Int, typical: Double?) -> String {
+    private func stageRowAccessibilityLabel(label: String, last: Double, sharePct: Int, typical: Double?,
+                                            recent: Bool) -> String {
+        if !recent {
+            if let typical, typical > 0 {
+                return String(localized: "\(label): \(durationText(last)) on the latest night, \(sharePct) percent of the night, typical \(durationText(typical))")
+            }
+            return String(localized: "\(label): \(durationText(last)) on the latest night, \(sharePct) percent of the night")
+        }
         if let typical, typical > 0 {
             return String(localized: "\(label): \(durationText(last)) last night, \(sharePct) percent of the night, typical \(durationText(typical))")
         }
@@ -1689,6 +1702,14 @@ struct SleepView: View {
                                   efficiency: nil, restingHr: nil, avgHrv: nil, stagesJSON: nil)
     }
 
+    /// True when a night ended today or yesterday, the only nights "Last night" may name. Every
+    /// "Last night" label shares this gate, so an old newest night reads "Latest night" throughout.
+    static func isRecentNight(endTs: Int, now: Date = Date(), calendar: Calendar = .current) -> Bool {
+        let ended = calendar.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(endTs)))
+        let today = calendar.startOfDay(for: now)
+        return (calendar.dateComponents([.day], from: ended, to: today).day ?? 99) <= 1
+    }
+
     /// Header above the hypnogram with ◀/▶ to browse past nights. ◀ goes older (increasing offset),
     /// ▶ goes newer; each is disabled at its bound. The canonical SectionHeader carries the
     /// hierarchy so the hero reads like every other section. (#160)
@@ -1698,12 +1719,7 @@ struct SleepView: View {
         let lastIndex = max(days.count - 1, 0)
         // "Last night" only when the newest recorded night really ended today or yesterday; a newest
         // night from weeks ago reads "Latest night" (its date sits in the trailing slot). (2026-10-21)
-        let newestIsRecent: Bool = {
-            guard let end = days.first?.map(\.endTs).max() else { return false }
-            let ended = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(end)))
-            let today = Calendar.current.startOfDay(for: Date())
-            return (Calendar.current.dateComponents([.day], from: ended, to: today).day ?? 99) <= 1
-        }()
+        let newestIsRecent = days.first?.map(\.endTs).max().map { SleepView.isRecentNight(endTs: $0) } ?? false
         let title: LocalizedStringKey = nightOffset == 0 ? (newestIsRecent ? "Last night" : "Latest night")
             : (nightOffset == 1 ? "1 night ago" : "\(nightOffset) nights ago")
         VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
