@@ -457,6 +457,12 @@ final class AppModel: ObservableObject, PerformanceStateFlushing {
             // One-shot rescore after the October 2026 calculation fixes, so days older than the 21-day
             // window get the corrected numbers too. Persisted flag; a no-op on every later launch.
             await self.intelligence.runAuditRescoreIfNeeded()
+            // `--exclude-days` on this launch (set from the Mac): add the days and rescore once so their
+            // computed rows go and the baselines refold without them.
+            if ExcludedDays.applyLaunchArguments() {
+                await self.intelligence.analyzeRecent()
+                await self.repo.refresh()
+            }
             while !Task.isCancelled {
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after

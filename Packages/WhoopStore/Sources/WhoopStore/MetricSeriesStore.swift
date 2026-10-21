@@ -65,6 +65,20 @@ extension WhoopStore {
         }
     }
 
+    /// Delete every key's points for `deviceId` on the given days (days the user excluded from scoring).
+    /// Returns rows deleted.
+    @discardableResult
+    public func deleteAllMetricSeries(deviceId: String, days: Set<String>) async throws -> Int {
+        guard !days.isEmpty else { return 0 }
+        return try syncWrite { db in
+            let marks = Array(repeating: "?", count: days.count).joined(separator: ", ")
+            let args: [DatabaseValueConvertible] = [deviceId] + days.sorted()
+            try db.execute(sql: "DELETE FROM metricSeries WHERE deviceId = ? AND day IN (\(marks))",
+                           arguments: StatementArguments(args))
+            return db.changesCount
+        }
+    }
+
     // MARK: - Reads
 
     /// Points for a single `key` on days in [from, to] (lexicographic YYYY-MM-DD compare),

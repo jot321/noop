@@ -294,8 +294,10 @@ final class IntelligenceEngine: ObservableObject {
         guard let counts = try? await store.hrDayCounts(deviceId: deviceId, from: now - historyDays * 86_400,
                                                         to: windowOldestIdx * 86_400 - tz, offsetSec: tz)
         else { return defaultDays }
+        // Excluded days count as handled, or their raw HR would widen every post-sync pass to reach them.
         let scored = Set(((try? await store.dailyMetrics(deviceId: deviceId + "-noop", from: "0000-01-01",
                                                          to: "9999-12-31")) ?? []).map(\.day))
+            .union(ExcludedDays.current())
         return Self.rescoreDays(hrDayCounts: counts, scoredDays: scored, todayIdx: todayIdx,
                                 tzOffset: tz, defaultDays: defaultDays, historyDays: historyDays)
     }
@@ -440,7 +442,10 @@ final class IntelligenceEngine: ObservableObject {
         // imported HRV/RHR/resp fields from computed values). Using the merge contaminated this very
         // "imported-only" baseline with computed values and made the fold window depend on whichever
         // refresh last ran (4000 vs 120 days). This mirrors the Android port's `days(importedDeviceId)`.
+        // Days the user excluded ("not me") are skipped everywhere below: not scored, not in any baseline.
+        let excluded = ExcludedDays.current()
         let hist = ((try? await store.dailyMetrics(deviceId: deviceId, from: "0000-01-01", to: "9999-12-31")) ?? [])
+            .filter { !excluded.contains($0.day) }
             .sorted { $0.day < $1.day }
         // HRV baseline honours the manual "Recalibrate baseline" epoch (noop.hrvBaselineEpoch); the
         // resting-HR baseline honours the Charge-wide sibling (noop.recoveryBaselineEpoch). Pass the
@@ -546,6 +551,7 @@ final class IntelligenceEngine: ObservableObject {
                                                        devices: regDevices, activeId: regActiveId,
                                                        registry: registry, fallbackDeviceId: ownerFallbackId)
 
+                guard !excluded.contains(day) else { continue }
                 let hr = (try? await store.hrSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
                 guard hr.count >= 200 else { continue }   // need real raw data, not a stray sample
                 // The 54 h read window reaches into the previous day, so it can hold 200 samples while
@@ -756,7 +762,7 @@ final class IntelligenceEngine: ObservableObject {
         if let passOldest = scoredNights.map({ $0.daily.day }).min() {
             let priorComputed = ((try? await store.dailyMetrics(deviceId: computedId, from: "0000-01-01",
                                                                 to: passOldest)) ?? [])
-                .filter { $0.day < passOldest }
+                .filter { $0.day < passOldest && !excluded.contains($0.day) }
             for d in priorComputed {
                 if histHrvByDay[d.day] == nil { histHrvByDay[d.day] = d.avgHrv }
                 if histRhrByDay[d.day] == nil { histRhrByDay[d.day] = d.restingHr.map(Double.init) }
@@ -1064,6 +1070,11 @@ final class IntelligenceEngine: ObservableObject {
         _ = try? await store.deleteMetricSeries(deviceId: computedId, keys: ["sleep_performance"],
                                                 from: oldestDay, to: newestDay,
                                                 keepingDays: Set(restPoints.map(\.day)))
+        // Excluded days may sit outside this window, so remove their computed rows wherever they are.
+        // Idempotent: a no-op once they are gone.
+        if !excluded.isEmpty {
+            await Self.purgeExcludedDays(excluded, store: store, computedId: computedId, offsetSec: tzOffset)
+        }
 
         // ── Advanced analytics (docs/ADVANCED_ANALYTICS_PLAN.md) ─────────────────────────────────────
         // Second, purely-additive pass over the nights just scored. For each night's in-bed window we
@@ -1787,6 +1798,31 @@ final class IntelligenceEngine: ObservableObject {
 
     /// True when at least `minSamples` HR samples fall inside the local day [dayStart, dayEnd) itself,
     /// not merely inside the wider read window around it. (Audit A13.)
+    /// Remove what the engine wrote for excluded days: the computed daily row, every metric-series point
+    /// and the detected sleep sessions that end on the day. Raw strap data and hand-edited sessions stay.
+    static func purgeExcludedDays(_ days: Set<String>, store: WhoopStore, computedId: String,
+                                offsetSec: Int) async {
+        for day in days {
+            _ = try? await store.deleteDailyMetrics(deviceId: computedId, from: day, to: day)
+        }
+        _ = try? await store.deleteAllMetricSeries(deviceId: computedId, days: days)
+        // A session's day is its wake day; read from 2 days before the oldest to the day after the newest.
+        guard let lo = days.min(), let hi = days.max(),
+              let loIdx = epochDayIndex(lo), let hiIdx = epochDayIndex(hi) else { return }
+        let sessions = (try? await store.sleepSessions(deviceId: computedId, from: (loIdx - 2) * 86_400,
+                                                       to: (hiIdx + 2) * 86_400, limit: 10_000)) ?? []
+        for start in excludedSessionStarts(sessions, excluded: days, offsetSec: offsetSec) {
+            _ = try? await store.deleteSleepSession(deviceId: computedId, startTs: start)
+        }
+    }
+
+    /// Start times of the detected (not hand-edited) sessions whose wake day is excluded. Pure.
+    nonisolated static func excludedSessionStarts(_ sessions: [CachedSleepSession], excluded: Set<String>,
+                                                  offsetSec: Int) -> [Int] {
+        sessions.filter { !$0.userEdited && excluded.contains(AnalyticsEngine.dayString($0.endTs, offsetSec: offsetSec)) }
+            .map(\.startTs)
+    }
+
     nonisolated static func hasOwnData(_ hr: [HRSample], dayStart: Int, dayEnd: Int, minSamples: Int = 200) -> Bool {
         var n = 0
         for s in hr where s.ts >= dayStart && s.ts < dayEnd {

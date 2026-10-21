@@ -155,4 +155,25 @@ final class MetricSeriesStoreTests: XCTestCase {
         let span = try await store.metricDays(deviceId: "devA", key: "missing")
         XCTAssertNil(span)
     }
+
+    // MARK: - deleteAllMetricSeries (excluded days, 2026-10-21)
+
+    func testDeleteAllMetricSeriesRemovesEveryKeyOnlyOnThoseDays() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertMetricSeries([
+            MetricPoint(day: "2026-08-02", key: "sleep_performance", value: 51.9),
+            MetricPoint(day: "2026-08-02", key: "hrv_rmssd_deep", value: 114),
+            MetricPoint(day: "2026-08-03", key: "acwr", value: 0.5),
+            MetricPoint(day: "2026-10-21", key: "sleep_performance", value: 88.7),
+        ], deviceId: "my-whoop-noop")
+        try await store.upsertMetricSeries([MetricPoint(day: "2026-08-02", key: "acwr", value: 0.7)],
+                                           deviceId: "other")
+        let n = try await store.deleteAllMetricSeries(deviceId: "my-whoop-noop", days: ["2026-08-02", "2026-08-03"])
+        XCTAssertEqual(n, 3)
+        let kept = try await store.metricSeries(deviceId: "my-whoop-noop", key: "sleep_performance",
+                                                from: "2026-01-01", to: "2026-12-31")
+        XCTAssertEqual(kept.map(\.day), ["2026-10-21"])
+        let other = try await store.metricSeries(deviceId: "other", key: "acwr", from: "2026-01-01", to: "2026-12-31")
+        XCTAssertEqual(other.count, 1, "another device's points stay")
+    }
 }

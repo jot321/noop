@@ -918,8 +918,25 @@ struct SettingsView: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                NavigationLink { ExcludedDaysView() } label: {
+                    HStack {
+                        Text("Excluded days").font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                        Spacer()
+                        Text(excludedDaysSummary).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
+    }
+
+    private var excludedDaysSummary: String {
+        let n = ExcludedDays.current().count
+        return n == 0 ? String(localized: "None") : n == 1 ? String(localized: "1 day") : String(localized: "\(n) days")
     }
 
     /// Write the recalibration anchor and trigger a recompute. Re-anchors EVERY baseline that feeds
