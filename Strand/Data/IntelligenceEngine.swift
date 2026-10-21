@@ -546,10 +546,11 @@ final class IntelligenceEngine: ObservableObject {
         // Returns nil under `habitualMinDays` of history → cold-start: every `analyzeDay`/`sleepEditedDaily`
         // call below stays on the overnight-band bonus. The same value threads into both seams so analytics
         // and the Sleep tab resolve to the identical block. (#547)
+        // Excluded days' sessions (hand-edited ones survive the purge) stay out of the learner too. (I9)
         let habitualMidsleepSec = await Self.computeHabitualMidsleep(
             store: store, importedId: deviceId, computedId: deviceId + "-noop",
             windowStart: nowLocalMidnight - maxDays * 86_400 - 30 * 3_600,
-            windowEnd: now, offsetSec: tzOffset)
+            windowEnd: now, offsetSec: tzOffset, excluded: excluded)
 
         // ── FIX 1 (main-actor jank): run the ENTIRE per-day enumeration OFF the main actor ───────────
         // Every `await store.…` read inside this loop has its continuation RESUME on the main actor
@@ -1981,7 +1982,7 @@ final class IntelligenceEngine: ObservableObject {
 
     private static func computeHabitualMidsleep(
         store: WhoopStore, importedId: String, computedId: String,
-        windowStart: Int, windowEnd: Int, offsetSec: Int
+        windowStart: Int, windowEnd: Int, offsetSec: Int, excluded: Set<String>
     ) async -> Int? {
         let imported = (try? await store.sleepSessions(deviceId: importedId, from: windowStart,
                                                        to: windowEnd, limit: 4000)) ?? []
@@ -1994,14 +1995,26 @@ final class IntelligenceEngine: ObservableObject {
         // covers an imported night and its computed twin (the longest capture wins, exactly what the
         // per-day length rule chose anyway).
         let merged = SleepSessionDedup.dedupe(imported + computed).kept
-        let blocks = merged.compactMap { s -> SleepStageTotals.HistoryBlock? in
+        let blocks = habitualHistoryBlocks(merged, excluded: excluded, offsetSec: offsetSec)
+        return SleepStageTotals.habitualMidsleepSec(blocks, offsetSec: offsetSec)
+    }
+
+    /// One learner block per session (effective bounds, keyed by the local day of its midpoint), leaving
+    /// out sessions that wake on an excluded day: a hand-edited "sleep" someone else logged on a day the
+    /// user marked "not me" survives the purge, and used to pull the learned bedtime. Shared with
+    /// `Repository.habitualMidsleepSec` so the Sleep tab and the engine learn the same value. (Audit I9.)
+    nonisolated static func habitualHistoryBlocks(_ sessions: [CachedSleepSession], excluded: Set<String>,
+                                                  offsetSec: Int) -> [SleepStageTotals.HistoryBlock] {
+        sessions.compactMap { s -> SleepStageTotals.HistoryBlock? in
             let start = s.effectiveStartTs, end = s.endTs
             guard end > start else { return nil }
+            if !excluded.isEmpty, excluded.contains(AnalyticsEngine.dayString(end, offsetSec: offsetSec)) {
+                return nil
+            }
             let mid = start + (end - start) / 2
             let dayKey = AnalyticsEngine.dayString(mid, offsetSec: offsetSec)
             return SleepStageTotals.HistoryBlock(start: start, end: end, dayKey: dayKey)
         }
-        return SleepStageTotals.habitualMidsleepSec(blocks, offsetSec: offsetSec)
     }
 
     /// Floor a unix-seconds timestamp to 00:00:00 of its UTC calendar day. Mirrors the Android

@@ -677,18 +677,30 @@ final class Repository: ObservableObject {
         // UNION the active strap (live raw, #814) with the canonical "my-whoop" import so a re-added strap's
         // live data AND the canonical history both surface, deduped per day (active strap wins). Collapses to
         // a single id on a single-device install (byte-identical to before).
-        let imported = await unionDailyMetrics(store: store, from: fromDay, to: toDay)
-        let computed = await unionComputedDailyMetrics(store: store, from: fromDay, to: toDay)
+        // Days the user excluded ("not me") leave the strap-sourced caches here, once, so nothing that
+        // reads `days` / `sleeps` (Stress and illness baselines, Health, cycle phase, Today and Coupled
+        // folds, Insights) sees them. The engine already skips them; imported rows and hand-edited
+        // sessions on those days are kept in the store and only hidden. (Audit I9, 2026-10-21.)
+        let excluded = ExcludedDays.current()
+        let imported = Self.droppingExcluded(await unionDailyMetrics(store: store, from: fromDay, to: toDay),
+                                             excluded)
+        let computed = Self.droppingExcluded(
+            await unionComputedDailyMetrics(store: store, from: fromDay, to: toDay), excluded)
         let apple = (try? await store.dailyMetrics(deviceId: Self.appleHealthSource, from: fromDay, to: toDay)) ?? []
-        let impSleep = await unionSleepSessions(store: store, from: lo, to: hi)
-        let compSleep = await unionComputedSleepSessions(store: store, from: lo, to: hi)
+        let impSleep = Self.droppingExcluded(await unionSleepSessions(store: store, from: lo, to: hi), excluded)
+        let compSleep = Self.droppingExcluded(await unionComputedSleepSessions(store: store, from: lo, to: hi),
+                                              excluded)
 
         // Export-verbatim sleep figures (long-format metricSeries rows from WhoopImporter).
         // SleepView prefers these per day over its APPROXIMATE recomputations.
-        let perf = await unionMetricSeries(store: store, key: "sleep_performance", from: fromDay, to: toDay)
-        let cons = await unionMetricSeries(store: store, key: "sleep_consistency", from: fromDay, to: toDay)
-        let need = await unionMetricSeries(store: store, key: "sleep_need_min", from: fromDay, to: toDay)
-        let debt = await unionMetricSeries(store: store, key: "sleep_debt_min", from: fromDay, to: toDay)
+        func figures(_ key: String) async -> [MetricPoint] {
+            await unionMetricSeries(store: store, key: key, from: fromDay, to: toDay)
+                .filter { !excluded.contains($0.day) }
+        }
+        let perf = await figures("sleep_performance")
+        let cons = await figures("sleep_consistency")
+        let need = await figures("sleep_need_min")
+        let debt = await figures("sleep_debt_min")
 
         // Merge + sort OFF the main actor (FIX 3): the figures build, the two O(n log n) daily/sleep merges,
         // the source-row sort, and the freshness counts are all pure over the rows just read, so they run in
@@ -738,6 +750,22 @@ final class Repository: ObservableObject {
         self.freshness = merged.freshness
         self.loaded = true
         self.refreshSeq += 1
+    }
+
+    /// Daily rows minus the excluded days. Pure.
+    nonisolated static func droppingExcluded(_ rows: [DailyMetric], _ excluded: Set<String>) -> [DailyMetric] {
+        excluded.isEmpty ? rows : rows.filter { !excluded.contains($0.day) }
+    }
+
+    /// Sleep sessions minus those that wake on an excluded day (a session's day is its wake day, keyed
+    /// like `userEditedDays`). Pure.
+    nonisolated static func droppingExcluded(_ sessions: [CachedSleepSession],
+                                             _ excluded: Set<String>) -> [CachedSleepSession] {
+        guard !excluded.isEmpty else { return sessions }
+        return sessions.filter { s in
+            let offsetSec = TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(s.endTs)))
+            return !excluded.contains(AnalyticsEngine.dayString(s.endTs, offsetSec: offsetSec))
+        }
     }
 
     /// Per-source coverage counts for the Freshness Pipeline card. Pure over the rows already read.
@@ -986,13 +1014,9 @@ final class Repository: ObservableObject {
         let imported = Self.dedupBlocks(await unionRawSleepBlocks(store: store, ids: importedReadIds, from: lo, to: hi))
         let computed = Self.dedupBlocks(await unionRawSleepBlocks(store: store, ids: computedReadIds, from: lo, to: hi))
         let offsetSec = TimeZone.current.secondsFromGMT()
-        let blocks = (imported + computed).compactMap { s -> SleepStageTotals.HistoryBlock? in
-            let start = s.effectiveStartTs, end = s.endTs
-            guard end > start else { return nil }
-            let mid = start + (end - start) / 2
-            let dayKey = AnalyticsEngine.dayString(mid, offsetSec: offsetSec)
-            return SleepStageTotals.HistoryBlock(start: start, end: end, dayKey: dayKey)
-        }
+        // Same blocks as the engine's learner, excluded days left out (audit I9).
+        let blocks = IntelligenceEngine.habitualHistoryBlocks(imported + computed, excluded: ExcludedDays.current(),
+                                                              offsetSec: offsetSec)
         return SleepStageTotals.habitualMidsleepSec(blocks, offsetSec: offsetSec)
     }
 
@@ -1865,6 +1889,9 @@ final class Repository: ObservableObject {
         for id in importedReadIds.reversed() {
             for p in (try? await store.metricSeries(deviceId: id, key: key, from: from, to: to)) ?? [] { byDay[p.day] = p.value }
         }
+        // Excluded ("not me") days are already out of `self.days`; keep their stored series points out too,
+        // so Today tiles and Insights don't read them back in. (Audit I9.)
+        for day in ExcludedDays.current() { byDay[day] = nil }
 
         return byDay.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
     }
