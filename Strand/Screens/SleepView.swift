@@ -493,13 +493,14 @@ struct SleepView: View {
         // night's sibling fragments are part of the night, NOT naps. Only blocks OUTSIDE that group are
         // naps. This matches the hero and AnalyticsEngine.analyzeDay; the old `!= editTarget.startTs` split
         // labelled the bridged siblings as phantom naps (#555). The summary stays explainable: Main X /
-        // Nap(s) Y / Total Z, with Main = the whole bridged night. (#508, #518, #555)
+        // Nap(s) Y / Total Z asleep, with Main = the whole bridged night. (#508, #518, #555)
         let groupStarts = night.mainGroupStarts
         let naps = night.sourceBlocks
             .filter { !groupStarts.contains($0.startTs) }
             .sorted { $0.effectiveStartTs < $1.effectiveStartTs }
-        let mainMin = night.stages.total
-        let napMin = naps.reduce(0.0) { $0 + Double($1.endTs - $1.effectiveStartTs) / 60.0 }
+        let split = SleepView.napSummaryMinutes(mainAwakeMin: night.stages.awake,
+                                                mainAsleepMin: night.stages.asleep, naps: naps)
+        let mainMin = split.main, napMin = split.naps
         NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.restColor) {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack {
@@ -514,7 +515,7 @@ struct SleepView: View {
                     .accessibilityLabel("Add a nap")
                 }
                 // Daily split (#518): only meaningful once the day has a nap; a single-night day reads
-                // exactly as before. Total = main + naps, the time that drives the day's Rest.
+                // exactly as before. Total = main + naps asleep. Rest scores the main night alone (#525).
                 if !naps.isEmpty {
                     napSummaryRow(mainMin: mainMin, napMin: napMin)
                     Divider().overlay(StrandPalette.hairline)
@@ -535,8 +536,20 @@ struct SleepView: View {
         }
     }
 
-    /// The Main / Naps / Total split for a day that has at least one nap, so what drives the day's Rest
-    /// total is explainable at a glance. Minutes formatted with the shared `durationText`. (#518)
+    /// The split's minutes ASLEEP: the main night's asleep minutes (in-bed counted its awake time too)
+    /// and each nap's staged asleep minutes, or its window when it carries no stages.
+    static func napSummaryMinutes(mainAwakeMin: Double, mainAsleepMin: Double,
+                                  naps: [CachedSleepSession]) -> (main: Double, naps: Double) {
+        let napMin = naps.reduce(0.0) { sum, nap in
+            let asleep = decodeSegments(nap.stagesJSON, sessionStart: nap.effectiveStartTs)?.stages.asleep
+                ?? decodeStages(nap.stagesJSON)?.asleep
+            return sum + (asleep ?? Double(nap.endTs - nap.effectiveStartTs) / 60.0)
+        }
+        return (mainAsleepMin, napMin)
+    }
+
+    /// The Main / Naps / Total asleep split for a day that has at least one nap, so the day's sleep is
+    /// explainable at a glance. Minutes formatted with the shared `durationText`. (#518)
     @ViewBuilder
     private func napSummaryRow(mainMin: Double, napMin: Double) -> some View {
         HStack(spacing: 0) {
