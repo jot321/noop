@@ -564,18 +564,11 @@ final class InsightsHubViewModel: ObservableObject {
             byBehaviour[e.question, default: []].insert(e.day)
         }
 
-        // Outcome series: imported metricSeries ∪ the DailyMetric column fallback so an
-        // account-free (strap-only) user still gets effects — the exact contract InsightsView uses.
-        let mergedDays = repo.days
+        // Outcome series, the exact read InsightsView uses: imported series, then the computed ("-noop")
+        // series, then the daily column. A strap-only user's Rest lives only in the computed series (I6).
         var byKey: [String: [String: Double]] = [:]
         for key in outcomeKeys {
-            let s = await repo.series(key: key, source: "my-whoop")
-            var dict: [String: Double] = [:]
-            for row in s { dict[row.day] = row.value }
-            for d in mergedDays where dict[d.day] == nil {
-                if let v = Self.dailyOutcome(key: key, day: d) { dict[d.day] = v }
-            }
-            byKey[key] = dict
+            byKey[key] = await repo.insightsOutcome(key: key)
         }
 
         // Dose rows per dosed behaviour, under the dedicated dose source, keyed by the
@@ -627,17 +620,6 @@ final class InsightsHubViewModel: ObservableObject {
     }
 
     // MARK: Static shaping helpers
-
-    /// The merged DailyMetric column backing an outcome key (strap-only fallback). sleep_performance
-    /// has no daily column, so it stays import-only — never seeded here (matches InsightsView).
-    private static func dailyOutcome(key: String, day d: DailyMetric) -> Double? {
-        switch key {
-        case "recovery": return d.recovery
-        case "hrv":      return d.avgHrv
-        case "rhr":      return d.restingHr.map(Double.init)
-        default:         return nil
-        }
-    }
 
     /// The metricSeries key a DoseResponsePriors outcome NAME maps to ("Charge"→recovery, "HRV"→hrv).
     static func outcomeKey(forEngineName name: String) -> String {

@@ -364,23 +364,17 @@ struct InsightsView: View {
         let nativeAnswers = await repo.nativeJournalAnswers(day: selectedDayKey)
         let nativeNumeric = await repo.nativeJournalNumeric(day: selectedDayKey)
 
-        // Daily metrics for the strap-only outcome fallback (merged, imported-wins). The view is
+        // Merged daily metrics (imported-wins) for the Activity Cost recovery side. The view is
         // MainActor-isolated, so reading the published cache here is on the right actor.
         let mergedDays = repo.days
 
-        // Outcome series (Whoop) → both [day:value] dictionaries and ordered series. The imported
-        // metricSeries only exists after a CSV import; fill the days it doesn't cover from the
-        // merged daily metrics so an account-free user's logging still gets effects
-        // (recovery/hrv/rhr have daily columns; sleep_performance stays import-only).
+        // Outcome series → both [day:value] dictionaries and ordered series.
         var byKey: [String: [String: Double]] = [:]
         var seriesMap: [String: [(day: String, value: Double)]] = [:]
         for key in outcomeKeys {
-            let s = await repo.series(key: key, source: "my-whoop")
-            var dict: [String: Double] = [:]
-            for row in s { dict[row.day] = row.value }
-            for d in mergedDays where dict[d.day] == nil {
-                if let v = Self.dailyOutcome(key: key, day: d) { dict[d.day] = v }
-            }
+            // Imported series, then the computed ("-noop") series, then the daily column: a strap-only
+            // user's Rest lives only in the computed series (audit I6).
+            let dict = await repo.insightsOutcome(key: key)
             byKey[key] = dict
             seriesMap[key] = dict.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
         }
@@ -454,18 +448,6 @@ struct InsightsView: View {
         loaded = true
         recomputeRanked()
         recomputeRelationships()
-    }
-
-    /// The merged DailyMetric column backing an outcome key, for days the imported metricSeries
-    /// doesn't cover (strap-only users). sleep_performance has no daily column, so it stays
-    /// import-only, never seeded here.
-    private static func dailyOutcome(key: String, day d: DailyMetric) -> Double? {
-        switch key {
-        case "recovery": return d.recovery
-        case "hrv":      return d.avgHrv
-        case "rhr":      return d.restingHr.map(Double.init)
-        default:         return nil
-        }
     }
 
     // MARK: - Activity Cost input shaping (#439)

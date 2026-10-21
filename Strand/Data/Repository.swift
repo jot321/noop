@@ -1896,6 +1896,15 @@ final class Repository: ObservableObject {
         return byDay.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
     }
 
+    /// One Insights outcome series (Charge / HRV / Rest / resting HR) as day → value, for InsightsView and
+    /// the Insights hub. The same layered read as Explore: imported series win, then the on-device computed
+    /// series, then the merged daily column. Reading the imported ids alone left Rest (`sleep_performance`,
+    /// written only to the computed series) empty for every strap-only user. (Audit I6, 2026-10-21.)
+    func insightsOutcome(key: String) async -> [String: Double] {
+        Dictionary(await exploreSeries(key: key, source: canonicalDeviceId).map { ($0.day, $0.value) },
+                   uniquingKeysWith: { _, last in last })
+    }
+
     /// The merged DailyMetric column backing an Explore metric key, for the days the imported/computed
     /// metricSeries doesn't cover (strap-only WHOOP 5 users). Mirrors InsightsView.dailyOutcome and
     /// Android's dailyPick, extended to every Explore "my-whoop" key that maps to a daily column.
@@ -1933,6 +1942,10 @@ final class Repository: ObservableObject {
         case "sleep_light_min", "core_min": return d.lightMin
         case "sleep_performance": return AnalyticsEngine.Rest.composite(daily: d)
         case "steps":            return d.steps.map(Double.init)
+        // The Today Steps card opens "Steps (estimated)". `steps_est` points exist only for a calibrated
+        // WHOOP 4.0; a 5/MG's own counter sits on the daily row, so fall back to it rather than show no
+        // data. Computed and imported `steps_est` points still win their days. (Audit T7, 2026-10-21.)
+        case "steps_est":        return d.steps.map(Double.init)
         case "active_kcal", "energy_kcal": return d.activeKcalEst
         default:                 return nil
         }
