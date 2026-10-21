@@ -425,9 +425,15 @@ struct MetricDetailView: View {
     @State private var heroAnimatedFraction: Double = 0
     /// Full ascending series for this metric — ALL history.
     @State private var series: [(day: String, value: Double)] = []
-    /// Every OTHER catalog series, loaded once for the correlation scan.
+    /// Every OTHER catalog series, for the correlation scan. Loaded by the correlation card's own
+    /// task AFTER this metric's series (see `loadOthers`), so the chart and stats never wait on it.
     @State private var others: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
     @State private var loaded = false
+    /// True once `others` has been read; until then the card says it is still checking rather than
+    /// "nothing correlates".
+    @State private var othersLoaded = false
+    /// The in-flight off-main correlation scan, cancelled when a newer one starts.
+    @State private var correlationTask: Task<Void, Never>?
 
     /// Cached correlation scan, keyed by its inputs (metric id + selected range + data generation),
     /// so the full cross-catalog Pearson sweep runs ONLY when those change — not on
@@ -436,7 +442,8 @@ struct MetricDetailView: View {
     @State private var correlationCache: [CorrRow] = []
     /// The (metricID, range) the cache was built for; nil means "not yet computed".
     @State private var correlationKey: String? = nil
-    /// Bumped each time `load()` replaces the series, so the correlation cache can't outlive the data.
+    /// Bumped each time `load()` or `loadOthers()` replaces data, so the correlation cache can't
+    /// outlive the data it was built from.
     @State private var dataGeneration = 0
     private var loadTaskID: String { "\(metric.id)|\(repo.refreshSeq)" }
 
@@ -642,19 +649,33 @@ struct MetricDetailView: View {
         // overnight keys render as %). Correlation is scale-invariant, so `others` stays raw.
         let scale = metric.displayScale
         series = scale == 1 ? raw : raw.map { (day: $0.day, value: $0.value * scale) }
-        var loadedOthers: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
-        for other in MetricCatalog.all where other.id != metric.id {
-            let s = await repo.exploreSeries(key: other.key, source: other.source)
-            if !s.isEmpty { loadedOthers.append((other, s)) }
-        }
-        others = loadedOthers
         dataGeneration += 1
         loaded = true
         // #943 selection seam: a locked default (.month with under a week of history) no longer
         // OVERWRITES @State range - it renders through `coercedSelection` instead (non-destructive,
         // recomputed every body eval), so a shrinking history re-coerces and a growing one un-coerces
         // with no snap-back. See `coercedSelection`.
-        // First correlation build, now that `series`/`others` exist.
+        // Rebuild the correlations for the new series (a no-op until `others` has loaded).
+        recomputeCorrelations()
+    }
+
+    /// Read every other catalog series for "What correlates". This used to run inside `load()`, so the
+    /// whole detail showed "Reading…" until ~80 sequential catalog reads (each hopping to the main
+    /// actor) had finished, on every open and every refresh (2026-10-21). It now runs as the card's
+    /// own task once the chart has painted, yielding between reads so scrolling stays responsive. The
+    /// reads and the scan are unchanged, so the rows are the same.
+    private func loadOthers() async {
+        var loadedOthers: [(metric: MetricDescriptor, series: [(day: String, value: Double)])] = []
+        for other in MetricCatalog.all where other.id != metric.id {
+            guard !Task.isCancelled else { return }
+            let s = await repo.exploreSeries(key: other.key, source: other.source)
+            if !s.isEmpty { loadedOthers.append((other, s)) }
+            await Task.yield()
+        }
+        guard !Task.isCancelled else { return }
+        others = loadedOthers
+        othersLoaded = true
+        dataGeneration += 1
         recomputeCorrelations()
     }
 
@@ -959,17 +980,17 @@ struct MetricDetailView: View {
 
     // MARK: Correlations
 
-    private struct CorrRow: Identifiable {
+    struct CorrRow: Identifiable {
         let id: String
         let metric: MetricDescriptor
         let r: Double
         let n: Int
     }
 
-    /// Top |r| catalog metrics over a given window (|r| ≥ 0.30, n ≥ 10). Pure — takes
-    /// the window so the heavy scan can be driven from `recomputeCorrelations()` into
-    /// the `@State` cache instead of running inside `body`.
-    private func computeCorrelationRows(windowed: [(day: String, value: Double)]) -> [CorrRow] {
+    /// Top |r| catalog metrics over a given window (|r| ≥ 0.30, n ≥ 10). Pure and nonisolated, so
+    /// `recomputeCorrelations()` runs it off the main actor and stores the result in the cache.
+    nonisolated static func correlationRows(windowed: [(day: String, value: Double)],
+                                            others: [(metric: MetricDescriptor, series: [(day: String, value: Double)])]) -> [CorrRow] {
         let myDays = Set(windowed.map(\.day))
         guard !myDays.isEmpty else { return [] }
         var rows: [CorrRow] = []
@@ -985,20 +1006,31 @@ struct MetricDetailView: View {
         return Array(rows.prefix(6))
     }
 
-    /// Rebuild the cached correlation scan for the CURRENT effective window, but only
-    /// when its key (metric id + selected range + data generation) actually changed — so
-    /// re-evals that don't alter the inputs (hover / HR ticks) are no-ops.
     /// The correlation cache key: metric, range AND the load generation. Without the generation a
     /// refresh that brought new data kept the old "What correlates" rows (the key never changed).
     static func correlationCacheKey(metricID: String, range: ExploreRange, dataGeneration: Int) -> String {
         "\(metricID)|\(range.rawValue)|\(dataGeneration)"
     }
 
+    /// Rebuild the cached correlation scan for the CURRENT effective window, but only
+    /// when its key (metric id + selected range + data generation) actually changed — so
+    /// re-evals that don't alter the inputs (hover / HR ticks) are no-ops. The Pearson sweep over
+    /// every catalog series runs off the main actor; a result for an outdated key is dropped.
     private func recomputeCorrelations() {
+        guard othersLoaded else { return }
         let key = Self.correlationCacheKey(metricID: metric.id, range: range, dataGeneration: dataGeneration)
         guard correlationKey != key else { return }
         correlationKey = key
-        correlationCache = computeCorrelationRows(windowed: slice(for: effectiveRange))
+        let windowed = slice(for: effectiveRange)
+        let others = self.others
+        correlationTask?.cancel()
+        correlationTask = Task {
+            let rows = await Task.detached(priority: .userInitiated) {
+                Self.correlationRows(windowed: windowed, others: others)
+            }.value
+            guard !Task.isCancelled, correlationKey == key else { return }
+            correlationCache = rows
+        }
     }
 
     private var correlationCard: some View {
@@ -1011,7 +1043,15 @@ struct MetricDetailView: View {
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
-                if rows.isEmpty {
+                if !othersLoaded {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking your other metrics…")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                } else if rows.isEmpty {
                     Text("Nothing in the catalog moves clearly with \(metric.title.lowercased()) over this window. Widen the range to surface relationships.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -1029,6 +1069,8 @@ struct MetricDetailView: View {
                 }
             }
         }
+        // The other catalog series load here, once the card is on screen, not before the chart.
+        .task(id: loadTaskID) { await loadOthers() }
     }
 
     @ViewBuilder
