@@ -693,6 +693,9 @@ private struct OverlayChart: View {
         let title: String
         let date: Date
         let norm: Double
+        /// Which unbroken run of the series this point belongs to: the line breaks over gaps.
+        var run: Int = 0
+        var line: String { title + "#" + String(run) }
     }
 
     /// Everything `body` derives from `series`, computed ONCE per data change instead
@@ -757,6 +760,14 @@ private struct OverlayChart: View {
                 }
                 if let row = s.rows.last, let d = dateCache[row.day] ?? parseCompareDay(row.day) {
                     caps.append(Plot(title: s.metric.title, date: d, norm: s.normalized(row.value)))
+                }
+                // Same gap rule as TrendChart, so an overlay doesn't draw a straight line across months.
+                pts.sort { $0.date < $1.date }
+                let breaks = TrendChart.gapBreaks(pts.map { TrendPoint(date: $0.date, value: $0.norm) })
+                var b = 0
+                for i in pts.indices {
+                    while b < breaks.count && breaks[b] < pts[i].date { b += 1 }
+                    pts[i].run = b
                 }
                 drawn.append(contentsOf: Model.minMaxBucketed(pts))
             }
@@ -856,7 +867,8 @@ private struct OverlayChart: View {
         Chart(model.plots) { p in
             LineMark(
                 x: .value("Date", p.date),
-                y: .value("Normalized", p.norm)
+                y: .value("Normalized", p.norm),
+                series: .value("Line", p.line)
             )
             .interpolationMethod(.monotone)
             .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
@@ -894,8 +906,9 @@ private struct OverlayChart: View {
         .chartYScale(domain: 0...1)
         .chartYAxis {
             // Normalized axis — label endpoints as low/high rather than raw numbers.
-            AxisMarks(position: .leading, values: [0.0, 0.5, 1.0]) { value in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+            AxisMarks(position: .trailing, values: [0.0, 0.5, 1.0]) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    .foregroundStyle(StrandPalette.hairlineStrong)
                 AxisValueLabel {
                     if let d = value.as(Double.self) {
                         Text(d == 0 ? "low" : d == 1 ? "high" : "mid")
@@ -906,8 +919,7 @@ private struct OverlayChart: View {
             }
         }
         .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                 AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
                     .font(StrandFont.footnote)
             }

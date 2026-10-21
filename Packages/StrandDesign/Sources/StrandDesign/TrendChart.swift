@@ -134,7 +134,7 @@ public struct TrendChart: View {
     /// Dates where the line breaks: the midpoint of every gap longer than 3× the series' median
     /// spacing (so a daily series breaks over a missing 3+ days, a 5-minute series over 15+ minutes).
     /// Pure; exposed for tests.
-    static func gapBreaks(_ sorted: [TrendPoint]) -> [Date] {
+    public static func gapBreaks(_ sorted: [TrendPoint]) -> [Date] {
         guard sorted.count >= 3 else { return [] }
         var deltas: [TimeInterval] = []
         deltas.reserveCapacity(sorted.count - 1)
