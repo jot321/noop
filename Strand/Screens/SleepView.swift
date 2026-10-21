@@ -1479,9 +1479,9 @@ struct SleepView: View {
     /// biphasic / interrupted night shows as ONE continuous sleep whose total matches the day's headline.
     /// It does NOT merge the whole day: an afternoon nap sits OUTSIDE the bridged group (its gap exceeds
     /// `gapBridgeMaxMin`), so it never folds in and stays a nap (the impossible 1 AM→5 PM merge #518 guarded
-    /// against). Stage minutes are SUMMED over the group (the inter-fragment wake gap belongs to no
-    /// fragment, so it is excluded from the minutes exactly as the engine excludes it), the hypnogram lays
-    /// each fragment's real timeline end-to-end, and `sourceBlocks` keeps every block so the naps card and
+    /// against). Stage minutes are SUMMED over the group plus the inter-fragment wake gap as awake, as the
+    /// engine counts it (#777), the hypnogram lays each fragment at its own clock time from the night's
+    /// onset (`mergeGroup`), and `sourceBlocks` keeps every block so the naps card and
     /// the daily Main/Nap/Total summary can read them. A single-block day is byte-identical to the prior
     /// behaviour. Returns nil if the group decodes to no usable stages. (#170, #318, #518, #555, #561)
 
@@ -1512,7 +1512,7 @@ struct SleepView: View {
     /// a stub when it leads the main-night group, so the displayed bedtime tracks where real sleep began. (#736)
     private func isPreOnsetAwakeStub(_ frag: CachedSleepSession) -> Bool {
         let spanMin = Double(frag.endTs - frag.effectiveStartTs) / 60.0
-        let asleepMin = decodeStages(frag.stagesJSON)?.asleep ?? 0
+        let asleepMin = SleepView.decodeStages(frag.stagesJSON)?.asleep ?? 0
         return SleepView.isPreOnsetAwakeStub(spanMin: spanMin, asleepMin: asleepMin)
     }
 
@@ -1544,6 +1544,59 @@ struct SleepView: View {
         return 0
     }
 
+    /// Stage minutes, hypnogram bands and movement strip of a bridged main-night group (ascending by
+    /// onset), laid on ONE timeline in seconds from the night's displayed `onset`.
+    struct MergedNightParts {
+        var awake = 0.0, light = 0.0, deep = 0.0, rem = 0.0
+        var intervals: [SleepInterval] = []
+        var motion: [Double] = []
+        var asleep: Double { light + deep + rem }
+    }
+
+    /// Merge a bridged main-night group. Every fragment is offset from the night's onset: decoding each
+    /// against its OWN start put the second block's bands at 0, on top of the first, and cut the time
+    /// axis short. The wake gap between fragments is awake time, as `AnalyticsEngine.analyzeDay` counts it
+    /// (#777): it adds to the awake minutes (so in-bed and efficiency match the day's totals) and draws as
+    /// an awake band. When any fragment has stored movement, the strip is laid on the same 30 s grid, with
+    /// zeros for the gap (and for a fragment with no stored series) so it stays under the right bands.
+    static func mergeGroup(_ group: [CachedSleepSession], onset: Int,
+                           motionByStart: [Int: [Double]]) -> MergedNightParts {
+        var out = MergedNightParts()
+        var gapBands: [SleepInterval] = []
+        let epochS = SleepStager.epochS
+        func epochs(_ seconds: Int) -> [Double] {
+            Array(repeating: 0, count: max(0, Int((Double(seconds) / epochS).rounded())))
+        }
+        // #407: the GROUP's stored per-epoch motion, keyed by the detected `startTs` (not the effective
+        // onset). If NO fragment has a series, `motion` stays empty → the honest "no movement detail" state.
+        let hasMotion = group.contains { motionByStart[$0.startTs] != nil }
+        for (i, frag) in group.enumerated() {
+            if i > 0 {
+                let prevEnd = group[i - 1].endTs, start = frag.effectiveStartTs
+                if start > prevEnd {
+                    gapBands.append(SleepInterval(stage: .awake, start: TimeInterval(prevEnd - onset),
+                                                  end: TimeInterval(start - onset)))
+                }
+                if hasMotion { out.motion += epochs(start - prevEnd) }
+            }
+            if let seg = decodeSegments(frag.stagesJSON, sessionStart: onset), seg.stages.total > 0 {
+                out.awake += seg.stages.awake; out.light += seg.stages.light
+                out.deep  += seg.stages.deep;  out.rem   += seg.stages.rem
+                out.intervals.append(contentsOf: seg.intervals)
+            } else if let st = decodeStages(frag.stagesJSON), st.total > 0 {
+                out.awake += st.awake; out.light += st.light
+                out.deep  += st.deep;  out.rem   += st.rem
+            }
+            if hasMotion { out.motion += motionByStart[frag.startTs] ?? epochs(frag.endTs - frag.effectiveStartTs) }
+        }
+        // The same gap definition the engine folds into AWAKE, so the two can't disagree.
+        out.awake += SleepStageTotals.interFragmentAwakeSeconds(
+            group.map { (start: $0.effectiveStartTs, end: $0.endTs) }) / 60.0
+        // Gap bands only on a real timeline; an imported (totals-only) night has none to sit in.
+        if !out.intervals.isEmpty { out.intervals += gapBands }
+        return out
+    }
+
     private func mergeDay(_ sessions: [CachedSleepSession]) -> Night? {
         let fullGroup = SleepView.mainNightGroup(sessions, habitualMidsleepSec: habitualMidsleepSec)
         // The displayed bedtime is the night's MAIN onset, aligned to the same fragment the pencil edits.
@@ -1554,27 +1607,11 @@ struct SleepView: View {
         // the totals start where the bedtime label does — a spurious leading pre-sleep awake stub is dropped
         // from the night's reconstruction (#736). It still rides in `sourceBlocks`/`mainGroupStarts`, so it's
         // never lost and never mislabelled as a nap. Without a leading stub this is the whole group (unchanged).
-        let group = fullGroup.drop { $0.effectiveStartTs < onset }
-        var stages = Stages(awake: 0, light: 0, deep: 0, rem: 0)
-        var segs: [SleepInterval] = []
-        // #407: lay the GROUP's per-epoch motion fragment-by-fragment in the SAME order the stage timeline
-        // is laid, reading the already-chosen group's stored series (NOT a re-resolution). The detected key
-        // (`startTs`, not `effectiveStartTs`) is the motion store's key. A fragment with no persisted series
-        // contributes nothing; if NO fragment has one, `motionEpochs` stays empty → honest empty state.
-        var motion: [Double] = []
-        for frag in group {
-            if let seg = decodeSegments(frag.stagesJSON, sessionStart: frag.effectiveStartTs), seg.stages.total > 0 {
-                stages.awake += seg.stages.awake; stages.light += seg.stages.light
-                stages.deep  += seg.stages.deep;  stages.rem   += seg.stages.rem
-                for iv in seg.intervals {
-                    segs.append(SleepInterval(stage: iv.stage, start: iv.start, end: iv.end))
-                }
-            } else if let st = decodeStages(frag.stagesJSON), st.total > 0 {
-                stages.awake += st.awake; stages.light += st.light
-                stages.deep  += st.deep;  stages.rem   += st.rem
-            }
-            if let m = motionByStart[frag.startTs] { motion.append(contentsOf: m) }
-        }
+        let group = Array(fullGroup.drop { $0.effectiveStartTs < onset })
+        let parts = SleepView.mergeGroup(group, onset: onset, motionByStart: motionByStart)
+        let stages = Stages(awake: parts.awake, light: parts.light, deep: parts.deep, rem: parts.rem)
+        let segs = parts.intervals
+        let motion = parts.motion
         guard stages.asleep > 0 else { return nil }
         let eff = stages.total > 0 ? stages.asleep / stages.total : nil
         let synth = CachedSleepSession(startTs: onset, endTs: wake, efficiency: eff,
@@ -1979,7 +2016,7 @@ struct SleepView: View {
     // MARK: - Stage decoding
 
     /// Decode the imported stagesJSON dict of MINUTES {"light","deep","rem","awake"}.
-    private func decodeStages(_ json: String?) -> Stages? {
+    private static func decodeStages(_ json: String?) -> Stages? {
         guard let json, let data = json.data(using: .utf8) else { return nil }
         guard let obj = try? JSONSerialization.jsonObject(with: data),
               let dict = obj as? [String: Any] else { return nil }
@@ -1997,7 +2034,7 @@ struct SleepView: View {
     /// Decode the COMPUTED stagesJSON segment array [{"start":epoch,"end":epoch,"stage":"wake"|
     /// "light"|"deep"|"rem"}] into stage totals plus the real timeline (seconds relative to the
     /// session start, the Hypnogram's domain). The on-device SleepStager calls awake "wake". (#77)
-    private func decodeSegments(
+    private static func decodeSegments(
         _ json: String?, sessionStart: Int
     ) -> (stages: Stages, intervals: [SleepInterval])? {
         guard let json, let data = json.data(using: .utf8),
