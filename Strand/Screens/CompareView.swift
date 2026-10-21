@@ -15,16 +15,8 @@ import WhoopStore
 // metric loads from repo.resolvedSeries (freshest-wins across imported / NOOP-computed /
 // compatible Apple Health, PR#196); everything else is derived in-view.
 
-// yyyy-MM-dd → Date, fixed UTC / en_US_POSIX (per task spec).
-private let compareDayParser: DateFormatter = {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.timeZone = TimeZone(identifier: "UTC")
-    f.dateFormat = "yyyy-MM-dd"
-    return f
-}()
-
-private func parseCompareDay(_ day: String) -> Date? { compareDayParser.date(from: day) }
+// yyyy-MM-dd → local midnight, the zone the overlay's axis and tooltip label in (see TrendDayKey).
+private func parseCompareDay(_ day: String) -> Date? { TrendDayKey.date(day) }
 
 // MARK: - Range control (shared spec — W / M / 3M / 6M / 1Y / ALL)
 
@@ -203,15 +195,13 @@ struct CompareView: View {
     // MARK: - Active windowed series
 
     /// A full-history series' rows over a given range, taken RELATIVE TO THAT SERIES'
-    /// LATEST data point (not "now"); `.all` returns everything.
+    /// LATEST data point (not "now"); `.all` returns everything. Compared as day keys: local
+    /// midnights are not 86 400 s apart across a DST change.
     private func slice(_ full: [(day: String, value: Double)], _ r: CompareRange) -> [(day: String, value: Double)] {
         guard let n = r.days else { return full }
-        guard let lastDay = full.last?.day, let last = parseCompareDay(lastDay) else { return [] }
-        let cutoff = last.addingTimeInterval(-Double(n - 1) * 86_400)
-        return full.filter { row in
-            guard let d = parseCompareDay(row.day) else { return false }
-            return d >= cutoff
-        }
+        guard let lastDay = full.last?.day, DayWindow.dayNumber(lastDay) != nil else { return [] }
+        let cutoff = DayWindow.windowStart(endingOn: lastDay, days: n)
+        return full.filter { $0.day >= cutoff }
     }
 
     /// The range actually used for a series: the SELECTED range when its window holds

@@ -4,6 +4,34 @@ import StrandAnalytics
 import WhoopStore
 import Foundation
 
+// MARK: - Day keys
+
+/// "yyyy-MM-dd" day keys (the LOCAL calendar day a row belongs to, see `Repository.localDayKey`) to
+/// chart dates, shared by Trends, Compare and Explore. A key parses to midnight in the same zone the
+/// charts, tooltips and heat strip format in: parsed as UTC midnight, "2026-07-14" showed as 13 Jul
+/// west of UTC and sat in Monday's heat-strip row (2026-10-21). The zone is a parameter only so tests
+/// can pin one; the screens use the device zone.
+enum TrendDayKey {
+    /// Midnight that starts `day` in `zone`, nil for a key that isn't a real date. Calendar maths
+    /// rather than a DateFormatter, which returns nil on a day whose midnight a DST jump skips.
+    static func date(_ day: String, in zone: TimeZone = .current) -> Date? {
+        guard let (y, m, d) = WeeklyDigestEngine.parseYMD(day) else { return nil }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = zone
+        return cal.date(from: DateComponents(year: y, month: m, day: d))
+    }
+
+    /// "14 Jul 2026" for `day`, formatted in the zone it was parsed in (Explore's "as of" line).
+    static func longLabel(_ day: String, in zone: TimeZone = .current) -> String? {
+        guard let d = date(day, in: zone) else { return nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = zone
+        f.dateFormat = "d MMM yyyy"
+        return f.string(from: d)
+    }
+}
+
 // MARK: - Trends
 //
 // The longitudinal view, rebuilt on the locked Noop component system so every
@@ -66,15 +94,8 @@ struct TrendsView: View {
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
 
-    // yyyy-MM-dd → Date (en_US_POSIX, UTC), per task spec.
-    private static let dayParser: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-    private func date(_ day: String) -> Date? { Self.dayParser.date(from: day) }
+    // yyyy-MM-dd → local midnight, the zone every chart labels in (see TrendDayKey).
+    private func date(_ day: String) -> Date? { TrendDayKey.date(day) }
 
     // MARK: Window selection (relative to the LATEST day, with auto-expand)
 

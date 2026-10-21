@@ -19,25 +19,11 @@ import WhoopStore
 // distinct); only when it holds ZERO points do we auto-expand to the smallest larger
 // range that does. The hero always shows the latest available point + "as of <date>".
 
-// yyyy-MM-dd → Date, fixed UTC / en_US_POSIX (per task spec).
-private let strandDayParser: DateFormatter = {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.timeZone = TimeZone(identifier: "UTC")
-    f.dateFormat = "yyyy-MM-dd"
-    return f
-}()
+// yyyy-MM-dd → local midnight, the zone the chart and its tooltip label in (see TrendDayKey).
+private func parseDay(_ day: String) -> Date? { TrendDayKey.date(day) }
 
-private func parseDay(_ day: String) -> Date? { strandDayParser.date(from: day) }
-
-/// "9 Jun 2026" — long, locale-stable date for the hero "as of" line.
-private func longDate(_ d: Date) -> String {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.timeZone = TimeZone(identifier: "UTC")
-    f.dateFormat = "d MMM yyyy"
-    return f.string(from: d)
-}
+/// "9 Jun 2026" — long, locale-stable date for the hero "as of" line, in the same local zone.
+private func longDate(_ day: String) -> String? { TrendDayKey.longLabel(day) }
 
 /// The category accent (colour communicates category only — never decoration).
 private func metricAccent(_ m: MetricDescriptor) -> Color {
@@ -455,15 +441,13 @@ struct MetricDetailView: View {
     // MARK: Derived
 
     /// The trailing-N-days slice for a given range, taken RELATIVE TO THE LATEST data
-    /// point (not "now") — `.all` returns everything.
+    /// point (not "now") — `.all` returns everything. Compared as day keys: local midnights are
+    /// not 86 400 s apart across a DST change.
     private func slice(for r: ExploreRange) -> [(day: String, value: Double)] {
         guard let days = r.days else { return series }
-        guard let lastDay = series.last?.day, let last = parseDay(lastDay) else { return [] }
-        let cutoff = last.addingTimeInterval(-Double(days - 1) * 86_400)
-        return series.filter { row in
-            guard let d = parseDay(row.day) else { return false }
-            return d >= cutoff
-        }
+        guard let lastDay = series.last?.day, DayWindow.dayNumber(lastDay) != nil else { return [] }
+        let cutoff = DayWindow.windowStart(endingOn: lastDay, days: days)
+        return series.filter { $0.day >= cutoff }
     }
 
     /// The range actually shown: the SELECTED range whenever its window holds ≥1
@@ -493,12 +477,12 @@ struct MetricDetailView: View {
         return .all
     }
 
-    /// Whole days between the first and last reading (0 for a single point). The
-    /// UTC-fixed day parser makes the Int truncation exact.
+    /// Whole days between the first and last reading (0 for a single point), counted on day keys
+    /// so a DST change can't shave a day off.
     private var historySpanDays: Int {
         guard let firstDay = series.first?.day, let lastDay = series.last?.day,
-              let first = parseDay(firstDay), let last = parseDay(lastDay) else { return 0 }
-        return Int(last.timeIntervalSince(first) / 86_400)
+              let first = DayWindow.dayNumber(firstDay), let last = DayWindow.dayNumber(lastDay) else { return 0 }
+        return last - first
     }
 
     /// Whether a range chip is selectable (#943, reimplemented from ryanbr's PR): a longer
@@ -681,8 +665,8 @@ struct MetricDetailView: View {
         let value = latest?.value
         let heroValue = latest.map { fmt($0.value) } ?? "—"
         let asOf: String = {
-            guard let day = latest?.day, let d = parseDay(day) else { return "—" }
-            return String(localized: "as of \(longDate(d))")
+            guard let day = latest?.day, let label = longDate(day) else { return "—" }
+            return String(localized: "as of \(label)")
         }()
         let fraction = value.flatMap { metricGaugeFraction(metric, value: $0) }
 
@@ -858,8 +842,8 @@ struct MetricDetailView: View {
                            windowed: [(day: String, value: Double)],
                            windowFellBack: Bool) -> some View {
         let asOf: String = {
-            guard let day = latest?.day, let d = parseDay(day) else { return "—" }
-            return String(localized: "as of \(longDate(d))")
+            guard let day = latest?.day, let label = longDate(day) else { return "—" }
+            return String(localized: "as of \(label)")
         }()
         let heroValue = latest.map { fmt($0.value) } ?? "—"
         let subtitle = windowFellBack
@@ -958,8 +942,8 @@ struct MetricDetailView: View {
     }
 
     private var latestCaption: String? {
-        guard let day = latest?.day, let d = parseDay(day) else { return nil }
-        return longDate(d)
+        guard let day = latest?.day else { return nil }
+        return longDate(day)
     }
 
     // MARK: Correlations
