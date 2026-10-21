@@ -36,43 +36,45 @@ struct SleepView: View {
     private let tileColumns = [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)]
 
     /// Memoized snapshot of every expensive derivation (latest Night with its intervals
-    /// resolved once, the seven metric series, the trend points, the typical means). Rebuilt
-    /// only when the underlying repo data actually changes — NOT on hover/animation/1Hz HR
-    /// ticks that merely re-evaluate `body`. `nil` until first build or when there's no night.
+    /// resolved once, the seven metric series, the trend points, the typical means). Built ONCE per
+    /// data refresh, in the `.task` after the blocks load — NOT on hover/animation/1Hz HR ticks that
+    /// merely re-evaluate `body`. `nil` until first build or when there's no night.
     @State private var model: SleepModel?
-    /// The repo signature the cached `model` was built from. Cheap to compute every render;
-    /// when it differs from the current inputs we rebuild the model.
-    @State private var modelKey: SleepInputKey?
+    /// True once the `.task` has built the model for the first time, so a nil `model` before then
+    /// reads "Loading" rather than the no-nights empty state.
+    @State private var modelBuilt = false
 
     /// Which night the hero hypnogram shows: 0 = last night, N = N sleep-sessions back.
-    /// Snaps back to 0 whenever the data key changes — a stale offset would silently point
+    /// Snaps back to 0 on every data refresh — a stale offset would silently point
     /// at a different session after a sync. The memoized trend `model` stays cached since
     /// the trends are night-independent. (#160)
     @State private var nightOffset = 0
     /// Memoized decode of the NAVIGATED night (nil when `nightOffset == 0` — the hero reads
-    /// `model.night` then). Rebuilt only in the `nightOffset` / data-key onChange handlers;
+    /// `model.night` then). Rebuilt only on a ◀/▶ press and on a data refresh;
     /// `decodedNight` JSON-decodes, which must never run per body pass (1Hz HR ticks). (#160)
     @State private var navNight: Night?
 
     /// Every sleep BLOCK across both sources, UN-deduplicated (`repo.allSleepSessions`) — `repo.sleeps`
     /// keeps one winner per night for the dashboard, collapsing split-sleep days (a nap + a main
-    /// sleep on the same day) into a single block. The hero groups these by day (`navDays`) and
-    /// merges each day into one Night, so a split day reads as one correctly-totalled night with the
-    /// gaps preserved. Oldest→newest. Falls back to `repo.sleeps` until loaded. (#170)
-    @State private var allSessions: [CachedSleepSession] = []
+    /// sleep on the same day) into a single block — grouped by the day they end on, newest day first.
+    /// The hero merges each day into one Night, so a split day reads as one correctly-totalled night
+    /// with the gaps preserved. Grouped once per refresh in the `.task` (it was regrouped on every body
+    /// pass); falls back to `repo.sleeps` when the full list is empty. (#170)
+    @State private var navDays: [[CachedSleepSession]] = []
 
     /// The user's LEARNED habitual midsleep (local time-of-day seconds), or nil under the cold-start
     /// threshold. Loaded from `repo.habitualMidsleepSec()` — the SAME value `AnalyticsEngine.analyzeDay`
     /// threads into the daily total — and fed into the main-night selector so the hero, the naps split,
     /// and the edit target pick the SAME block the analytics rollup did, for a shift/late sleeper too. nil
-    /// keeps the existing cold-start overnight-band fallback. (#547) Refreshed with `allSessions`.
+    /// keeps the existing cold-start overnight-band fallback. (#547) Refreshed with `navDays`.
     @State private var habitualMidsleepSec: Int? = nil
 
-    /// Persisted per-epoch MOTION series keyed by each session's detected `startTs` (#407). Loaded in the
-    /// same `.task` as `allSessions` from `repo.sessionMotions(starts:)`, then laid along the hypnogram for
-    /// the SAME main-night GROUP blocks the hero resolved (mergeDay's group) — we do NOT re-resolve the
-    /// night, only read the already-chosen group's stored motion. A block with no stored series stays absent
-    /// (honest empty state for older rows whose `motionJSON` is NULL). Refreshed with `allSessions`.
+    /// Persisted per-epoch MOTION series keyed by each session's detected `startTs` (#407), laid along the
+    /// hypnogram for the SAME main-night GROUP blocks the hero resolved (mergeDay's group) — we do NOT
+    /// re-resolve the night, only read the already-chosen group's stored motion. Fetched only for the night
+    /// on screen: the newest one in the `.task`, a browsed one on its ◀/▶ press (it was one read per stored
+    /// block, in sequence, on every refresh). A block with no stored series stays absent (honest empty
+    /// state for older rows whose `motionJSON` is NULL).
     @State private var motionByStart: [Int: [Double]] = [:]
 
     /// Draw-in fraction for the Rest hero gauge — owned here so the gauge animates the arc on appear /
@@ -106,13 +108,10 @@ struct SleepView: View {
     @State private var sleepUndoTask: Task<Void, Never>?
 
     var body: some View {
-        // Resolve the memoized model for THIS render. `dataKey` is O(1)-ish (counts + last-row
-        // identity), so comparing it every render is cheap. When it matches the cached key we
-        // reuse the cached model untouched — the many body re-evaluations from hover/animation/
-        // 1Hz HR ticks pay nothing. When it differs (or on first render) we build once, here,
-        // synchronously, so the very first frame already shows content (no empty-state flash).
-        let key = dataKey
-        let resolved: SleepModel? = (key == modelKey) ? model : buildModel()
+        // The memoized model: body re-evaluations from hover/animation/1Hz HR ticks pay nothing. It
+        // was also rebuilt here and in an onChange whenever the data key moved, both from the stale
+        // block list, before the `.task` built it a third time; now the `.task` alone builds it.
+        let resolved = model
         ScreenScaffold(title: "Sleep", subtitle: "Last night, read in two seconds.",
                        // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
                        // alignment/spacing/header), builds trailing trend/ledger cards on demand. Combined
@@ -137,6 +136,8 @@ struct SleepView: View {
                         SleepMarkCard()
                         SleepAnalyticsCard()
                     }
+                } else if !modelBuilt {
+                    ComingSoon(what: "Loading your sleep history…")
                 } else {
                     emptyState
                 }
@@ -149,47 +150,33 @@ struct SleepView: View {
             .onAppear {
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = heroScoreFraction(resolved) }
             }
-            // Persist the freshly-built model so subsequent renders with the same inputs hit
-            // the cache. Writing State during body is not allowed, so commit it after layout;
-            // `resolved` already drives THIS frame, so there is no flash and no extra rebuild.
-            .onChangeCompat(of: key) { newKey in
-                modelKey = newKey
-                model = buildModel()
-                // New data invalidates a navigated offset — the same offset would silently
-                // point at a different session. Snap back to last night. (#160)
-                nightOffset = 0
-                navNight = nil
-            }
             // The navigated night is decoded once per ◀/▶ press, never per body pass —
             // `decodedNight` JSON-decodes and body re-evaluates at 1Hz while HR streams. (#160)
             .onChangeCompat(of: nightOffset) { newOffset in
                 navNight = newOffset == 0 ? nil : decodedNight(at: newOffset)
-            }
-            .onAppear {
-                if modelKey != key {
-                    modelKey = key
-                    model = resolved
-                    nightOffset = 0
-                    navNight = nil
-                }
+                if newOffset != 0 { Task { await loadMotion(forNightAt: newOffset) } }
             }
             // Load EVERY sleep block across BOTH sources (un-deduplicated) so the hero's ◀/▶ can
             // browse split-sleep days the dashboard collapses — including Bluetooth-only nights,
             // whose blocks live under the computed source. Re-runs whenever a sync/import bumps
-            // refreshSeq; snaps back to the newest day and rebuilds the model so offset 0 reflects
-            // the freshly-loaded blocks. (#170)
+            // refreshSeq (every publish of repo.days/sleeps bumps it); snaps back to the newest day and
+            // builds the model ONCE so offset 0 reflects the freshly-loaded blocks. (#170)
             .task(id: repo.refreshSeq) {
-                allSessions = await repo.allSleepSessions()
+                let sessions = await repo.allSleepSessions()
                 // Load the learned habitual midsleep the engine used, so the main-night pick aligns to it
                 // (a shift/late sleeper) instead of only the cold-start band. nil under threshold. (#547)
-                habitualMidsleepSec = await repo.habitualMidsleepSec()
-                // Per-epoch motion for every block (#407), keyed by detected start. mergeDay reads only the
-                // already-resolved group's entries — this just pre-fetches them all so the model build is sync.
-                motionByStart = await repo.sessionMotions(starts: allSessions.map { $0.startTs })
+                let habitual = await repo.habitualMidsleepSec()
+                let days = SleepView.groupByEndDay(sessions.isEmpty ? repo.sleeps : sessions)
+                // Per-epoch motion (#407) for the newest night's main-night group only, keyed by detected
+                // start; mergeDay reads just those. A browsed night fetches its own on the ◀/▶ press.
+                let newest = SleepView.mainNightGroup(days.first ?? [], habitualMidsleepSec: habitual)
+                motionByStart = await repo.sessionMotions(starts: newest.map(\.startTs))
+                navDays = days
+                habitualMidsleepSec = habitual
                 nightOffset = 0
                 navNight = nil
-                modelKey = dataKey
                 model = buildModel()
+                modelBuilt = true
             }
             .sheet(item: $wakeEdit) { edit in
                 // The night's RECORDED coverage for the #940 guards: from the immutable detected
@@ -1331,23 +1318,7 @@ struct SleepView: View {
 
     // MARK: - Memoization plumbing
 
-    /// A cheap fingerprint of the repo inputs this screen derives from. Recomputed every
-    /// render but only contains counts + the identity of the newest/oldest rows, so equality
-    /// is fast. When it changes we know `repo.days`/`repo.sleeps` actually changed and the
-    /// memoized `model` must be rebuilt; otherwise hover/animation/1Hz HR re-renders are free.
-    private var dataKey: SleepInputKey {
-        SleepInputKey(
-            loaded: repo.loaded,
-            daysCount: repo.days.count,
-            sleepsCount: repo.sleeps.count,
-            firstDay: repo.days.first?.day,
-            lastDay: repo.days.last?.day,
-            lastDayUpdated: repo.days.last,
-            lastSleep: repo.sleeps.last,
-            refreshSeq: repo.refreshSeq)
-    }
-
-    /// Build every expensive derivation exactly once. Called only when `dataKey` changes,
+    /// Build every expensive derivation exactly once. Called only from the refresh `.task`,
     /// so each full pass over repo.days / repo.sleeps runs once per data change rather than
     /// once per render. Returns nil when there is no usable latest night (renders empty state).
     private func buildModel() -> SleepModel? {
@@ -1417,22 +1388,10 @@ struct SleepView: View {
     /// the hypnogram draws genuine segments instead of the synthetic reconstruction.
     private var latestNight: Night? { decodedNight(at: 0) }
 
-    /// The browsable block list: every sleep session un-deduplicated (incl. same-day naps / split
-    /// sleep). Falls back to `repo.sleeps` (one-per-night) until the fuller list loads, so the hero
-    /// is never empty during the first frame. (#170)
-    private var navSessions: [CachedSleepSession] {
-        allSessions.isEmpty ? repo.sleeps : allSessions
-    }
-
-    /// The browsable DAY list: every block grouped by the calendar day it ENDS on (matching the
-    /// dashboard's per-night merge), newest day first, blocks within a day oldest→newest. Each day
+    /// The browsable DAY list (`navDays`): every block grouped by the calendar day it ENDS on (matching
+    /// the dashboard's per-night merge), newest day first, blocks within a day oldest→newest. Each day
     /// is ONE ◀/▶ stop, so a split-sleep day reads as a single night and the "N nights ago" label
     /// stays truthful — two blocks of the same day are never "1 night ago" AND "2 nights ago". (#170)
-    private var navDays: [[CachedSleepSession]] {
-        SleepView.groupByEndDay(navSessions)
-    }
-
-    /// Blocks grouped by the calendar day they END on, newest day first, oldest→newest inside a day.
     static func groupByEndDay(_ sessions: [CachedSleepSession],
                               calendar: Calendar = .current) -> [[CachedSleepSession]] {
         func endDay(_ s: CachedSleepSession) -> Date {
@@ -1678,6 +1637,19 @@ struct SleepView: View {
         let days = navDays
         guard offset >= 0, offset < days.count else { return nil }
         return mergeDay(days[offset])
+    }
+
+    /// Fetch the stored movement for the main-night group of the day `offset` stops back, if not yet
+    /// read, and re-decode that night so its strip fills in. Runs after the ◀/▶ press has already shown
+    /// the night, and only while it is still the one on screen.
+    private func loadMotion(forNightAt offset: Int) async {
+        let group = SleepView.mainNightGroup(dayBlocks(at: offset), habitualMidsleepSec: habitualMidsleepSec)
+        let missing = group.map(\.startTs).filter { motionByStart[$0] == nil }
+        guard !missing.isEmpty else { return }
+        let fetched = await repo.sessionMotions(starts: missing)
+        guard !fetched.isEmpty else { return }
+        motionByStart.merge(fetched) { kept, _ in kept }
+        if nightOffset == offset { navNight = decodedNight(at: offset) }
     }
 
     /// A synthetic session for the DAY `offset` stops back, spanning the MAIN block's window (not the
@@ -2257,24 +2229,6 @@ private struct DiagonalHatch: Shape {
 
 // MARK: - Local value types
 
-/// Cheap, Equatable fingerprint of the repo inputs SleepView derives from. Two snapshots are
-/// equal iff the data the screen reads is unchanged, so the heavy `SleepModel` rebuild is
-/// skipped on the many `body` re-evaluations that don't touch sleep data.
-private struct SleepInputKey: Equatable {
-    let loaded: Bool
-    let daysCount: Int
-    let sleepsCount: Int
-    let firstDay: String?
-    let lastDay: String?
-    /// Newest day row (Equatable) — catches in-place edits to the latest day's values.
-    let lastDayUpdated: DailyMetric?
-    /// Newest sleep session (Equatable) — catches a re-import of the latest night.
-    let lastSleep: CachedSleepSession?
-    /// Bumped on every Repository.refresh — catches a re-import that changes only the
-    /// imported metricSeries figures (importedSleep) without touching days/sleeps.
-    let refreshSeq: Int
-}
-
 /// Memoized result of every expensive SleepView derivation. Built once per data change in
 /// `buildModel()` and read by the subviews, so full passes over repo.days / repo.sleeps and
 /// the Night.intervals reconstruction no longer run on every render.
@@ -2357,17 +2311,27 @@ private struct Night {
     /// (no re-derived overnight gate). Passes the same learned habitual the hero used, so the edit target
     /// matches the hero block even for a shift/late sleeper. Its `startTs` is a genuine detected key, so
     /// `applySleepEdit` matches. nil when there's no underlying block (a synthetic stub) — the edit
-    /// affordance is then hidden. (#318, #518, #547)
-    var editTarget: CachedSleepSession? {
-        SleepView.mainNightSession(sourceBlocks, habitualMidsleepSec: habitualMidsleepSec)
-    }
+    /// affordance is then hidden. (#318, #518, #547) Resolved once here, not on every body pass.
+    let editTarget: CachedSleepSession?
 
     /// The `startTs` of every block in the day's bridged MAIN-night GROUP (the winning block plus the
     /// fragments bridged into it, #561), so the naps card excludes ALL of them — only blocks OUTSIDE the
     /// group are naps. Without this the tab treated every block except the single winner as a nap and a
-    /// biphasic night rendered as phantom naps. (#555)
-    var mainGroupStarts: Set<Int> {
-        Set(SleepView.mainNightGroup(sourceBlocks, habitualMidsleepSec: habitualMidsleepSec).map { $0.startTs })
+    /// biphasic night rendered as phantom naps. (#555) Resolved once here, not on every body pass.
+    let mainGroupStarts: Set<Int>
+
+    init(session: CachedSleepSession, stages: Stages, realSegments: [SleepInterval]? = nil,
+         sourceBlocks: [CachedSleepSession] = [], motionEpochs: [Double] = [],
+         habitualMidsleepSec: Int? = nil) {
+        self.session = session
+        self.stages = stages
+        self.realSegments = realSegments
+        self.sourceBlocks = sourceBlocks
+        self.motionEpochs = motionEpochs
+        self.habitualMidsleepSec = habitualMidsleepSec
+        self.editTarget = SleepView.mainNightSession(sourceBlocks, habitualMidsleepSec: habitualMidsleepSec)
+        self.mainGroupStarts = Set(SleepView.mainNightGroup(sourceBlocks, habitualMidsleepSec: habitualMidsleepSec)
+            .map { $0.startTs })
     }
 
     /// Total time in bed in minutes (from reconstructed stages).
