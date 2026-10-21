@@ -34,6 +34,15 @@ struct ChartGalleryDemoHost: View {
         return july + oct
     }
 
+    /// A year of Charge with a two-month hole, like real use.
+    private var heat: [RecoveryDay] {
+        (0..<365).compactMap { i -> RecoveryDay? in
+            guard !(200..<280).contains(i) else { return nil }
+            let v: Double = 55 + 25 * sin(Double(i) / 9)
+            return RecoveryDay(date: Self.day0.addingTimeInterval(TimeInterval((i - 364) * 86_400)), score: v)
+        }
+    }
+
     private var stress: [TrendPoint] {
         (0..<30).map { i -> TrendPoint in
             let wave: Double = 0.8 * sin(Double(i) / 4)
@@ -57,6 +66,9 @@ struct ChartGalleryDemoHost: View {
                     TrendChart(points: hrv, valueRange: 30...60, valueFormat: { "\(Int($0.rounded())) ms" })
                 } footer: {
                     ChartFooter([("Latest", "47 ms"), ("Average", "45 ms"), ("Nights", "14")])
+                }
+                NoopCard {
+                    YearHeatStrip(days: heat, cellSize: 5, spacing: 1.5)
                 }
                 ChartCard(title: "Stress", subtitle: "Daily 0–3 proxy", trailing: "avg 1.5") {
                     TrendChart(points: stress, valueRange: 0...3, valueFormat: { String(format: "%.1f", $0) })

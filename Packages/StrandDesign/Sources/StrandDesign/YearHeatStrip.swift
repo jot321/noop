@@ -172,14 +172,29 @@ public struct YearHeatStrip: View {
                             .frame(width: gutterWidth, height: cellSize, alignment: .trailing)
                     }
                 }
-                // week columns
-                ForEach(Array(weeks.enumerated()), id: \.element.id) { weekIndex, week in
-                    VStack(spacing: spacing) {
-                        ForEach(0..<7, id: \.self) { row in
-                            cell(week.cells[row], isHovered: isHovered(weekIndex, row))
+                // Week columns, drawn in one Canvas: a year is ~370 cells, and one view per cell (shape,
+                // frame, opacity, outline) made Trends measurably slower to open once the strip spanned
+                // real calendar weeks (2026-10-21).
+                Canvas { ctx, _ in
+                    let step = cellSize + spacing
+                    for (wi, week) in weeks.enumerated() {
+                        for row in 0..<7 {
+                            guard let day = week.cells[row] else { continue }
+                            let rect = CGRect(x: CGFloat(wi) * step, y: CGFloat(row) * step,
+                                              width: cellSize, height: cellSize)
+                            let path = Path(roundedRect: rect, cornerRadius: 2.5)
+                            if let score = day.score {
+                                let dimmed = hoverCell != nil && !isHovered(wi, row)
+                                ctx.fill(path, with: .color(StrandPalette.recoveryColor(score).opacity(dimmed ? 0.78 : 1)))
+                            } else {
+                                ctx.fill(path, with: .color(StrandPalette.surfaceInset))
+                                ctx.stroke(path, with: .color(StrandPalette.hairline.opacity(0.6)), lineWidth: 0.5)
+                            }
                         }
                     }
                 }
+                .frame(width: max(0, CGFloat(weeks.count) * (cellSize + spacing) - spacing),
+                       height: 7 * (cellSize + spacing) - spacing)
             }
         }
         .frame(width: gridWidth, height: gridHeight, alignment: .topLeading)
@@ -278,31 +293,8 @@ public struct YearHeatStrip: View {
             .allowsHitTesting(false)
         }
     }
-
-    @ViewBuilder
-    private func cell(_ day: RecoveryDay?, isHovered: Bool) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 2.5)
-        if let day, let score = day.score {
-            shape
-                .fill(StrandPalette.recoveryColor(score))
-                .frame(width: cellSize, height: cellSize)
-                .opacity(isHovered ? 1.0 : (hoverCell == nil ? 1.0 : 0.78))
-                .help("\(DateFormatterCache.day.string(from: day.date)) · recovery \(Int(score.rounded()))")
-                // No per-cell a11y element: the whole strip is one collapsed VoiceOver element (see the
-                // `children: .ignore` summary on the body), so per-day detail no longer builds an O(days)
-                // semantics subtree. The `.help` above stays — it's a macOS pointer tooltip, not an a11y node.
-        } else if day != nil {
-            shape
-                .fill(StrandPalette.surfaceInset)
-                .overlay(shape.stroke(StrandPalette.hairline.opacity(0.6), lineWidth: 0.5))
-                .frame(width: cellSize, height: cellSize)
-        } else {
-            shape
-                .fill(Color.clear)
-                .frame(width: cellSize, height: cellSize)
-        }
-    }
 }
+
 
 // Small cached formatters (creating DateFormatter is expensive).
 private enum DateFormatterCache {
