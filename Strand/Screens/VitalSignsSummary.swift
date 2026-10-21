@@ -296,10 +296,11 @@ enum BodyVitalSigns {
         return f
     }()
 
+    /// Day keys are local calendar days, and the label formatter is local too: parsing them as UTC put
+    /// every label a day early west of UTC ("2026-10-20" read "19 Oct" in California).
     static let dayParser: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()

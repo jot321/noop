@@ -32,6 +32,11 @@ struct LiquidTodayView: View {
     @State private var stressDay: String?          // the day that score describes (StressModel.asOfDay)
     @State private var fitnessAge: Double?         // exploreSeries("fitness_age").last
     @State private var vitality: Double?           // exploreSeries("vitality").last
+    @State private var fitnessAgeDay: String?      // the day those weekly values were banked
+    @State private var vitalityDay: String?
+    /// Today's logical day key; a change (04:00 rollover seen on foreground or at midnight) reloads.
+    @State private var logicalToday = Repository.logicalDayKey(Date())
+    @Environment(\.scenePhase) private var scenePhase
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
     @State private var hrPoints: [TrendPoint] = [] // the same buckets with their times, for the HR chart
@@ -43,10 +48,11 @@ struct LiquidTodayView: View {
     @State private var stepsByDay: [String: Double] = [:]
     @State private var stepsLast: Double?
     /// 7-day series (oldest first) ending on the selected day, for the tiles' mini charts. Built in load().
-    @State private var weekHrv: [Double] = []
-    @State private var weekRhr: [Double] = []
-    @State private var weekResp: [Double] = []
-    @State private var weekSteps: [Double] = []
+    /// One slot per calendar day (nil = no reading), so a gap stays a gap in the mini charts.
+    @State private var weekHrv: [Double?] = []
+    @State private var weekRhr: [Double?] = []
+    @State private var weekResp: [Double?] = []
+    @State private var weekSteps: [Double?] = []
     /// The days before the selected day inside the same 7-day window, for the "vs 7 days" captions.
     @State private var priorHrv: [Double] = []
     @State private var priorRhr: [Double] = []
@@ -303,7 +309,16 @@ struct LiquidTodayView: View {
         // feel physical ("every tiny little thing").
         .liquidSelectionHaptic(trigger: selectedDayOffset)
         .task(id: repo.refreshSeq) { await loadHistory() }
-        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)") { await load() }
+        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(logicalToday)") { await load() }
+        // Day rollover: the data may not change overnight (strap off), so key the load on the day too.
+        .onChangeCompat(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            let k = Repository.logicalDayKey(Date())
+            if k != logicalToday { logicalToday = k }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+            logicalToday = Repository.logicalDayKey(Date())
+        }
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
         }
@@ -446,6 +461,9 @@ struct LiquidTodayView: View {
             MinimalScoreCell(label: "Charge", score: displayDay?.recovery, tint: StrandPalette.chargeColor,
                              onGuide: { showChargeDetail = true })
             MinimalScoreCell(label: "Effort", score: displayDay?.strain, tint: StrandPalette.effortColor,
+                             // The ring prints whole numbers on 0–100; only the 0–21 scale needs the converter.
+                             text: effortScale == .hundred
+                                 ? nil : displayDay?.strain.map { UnitFormatter.effortDisplay($0, scale: effortScale) },
                              onGuide: { guideSection = .effort })
             MinimalScoreCell(label: "Rest", score: restScore, tint: StrandPalette.restColor,
                              onGuide: { guideSection = .rest })
@@ -457,11 +475,17 @@ struct LiquidTodayView: View {
     private var chargeDetail: some View {
         let row = displayDay
         var drivers: [ChargeDriver] = []
-        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+        // Fold only the nights before this one, with the engine's recalibration epochs, so the drivers
+        // explain the score the ring shows (folding every day, this night included, explained another).
+        let prior = repo.days.filter { $0.day < (row?.day ?? selectedDayKey) }.sorted { $0.day < $1.day }
+        let keys = prior.map(\.day)
+        let epoch = Baselines.recoveryBaselineEpoch()
+        let hrvBase = Baselines.foldHistory(prior.map(\.avgHrv), dayKeys: keys, cfg: Baselines.hrvCfg)
         if let row, let hrv = row.avgHrv, let rhr = row.restingHr, hrvBase.usable {
-            let rhrBase = Baselines.foldHistory(repo.days.map { $0.restingHr.map(Double.init) },
-                                                cfg: Baselines.restingHRCfg)
-            let respBase = Baselines.foldHistory(repo.days.map(\.respRateBpm), cfg: Baselines.respCfg)
+            let rhrBase = Baselines.foldHistory(prior.map { $0.restingHr.map(Double.init) }, dayKeys: keys,
+                                                cfg: Baselines.restingHRCfg, baselineEpoch: epoch)
+            let respBase = Baselines.foldHistory(prior.map(\.respRateBpm), dayKeys: keys,
+                                                 cfg: Baselines.respCfg, baselineEpoch: epoch)
             drivers = RecoveryScorer.chargeDrivers(
                 hrv: hrv, rhr: Double(rhr), resp: row.respRateBpm,
                 hrvBaseline: hrvBase,
@@ -485,7 +509,7 @@ struct LiquidTodayView: View {
                 .foregroundStyle(StrandPalette.textPrimary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            if let note = chargeCalibrationNote {
+            if selectedDayOffset == 0, let note = chargeCalibrationNote {
                 Text(note).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                     .multilineTextAlignment(.center)
             }
@@ -511,8 +535,11 @@ struct LiquidTodayView: View {
                     // this card, never the whole Today. Shows the current bpm live with a rolling
                     // beat-by-beat trace; falls back to today's banked 5-minute chart when idle.
                     LiquidLiveHR(tint: liquidHeart, fallback: hrValues, points: hrPoints,
-                                 animated: dataLoaded && !heroOffscreen)
-                    NavigationLink { FullDayChartView() } label: {
+                                 allowLive: selectedDayOffset == 0, animated: dataLoaded && !heroOffscreen)
+                    NavigationLink {
+                        FullDayChartView(dayStart: selectedDayOffset == 0
+                                         ? nil : Calendar.current.startOfDay(for: selectedLogicalDay))
+                    } label: {
                         HStack(spacing: 4) {
                             Spacer()
                             Text("Full day").font(StrandFont.caption).foregroundStyle(StrandPalette.accent)
@@ -563,10 +590,12 @@ struct LiquidTodayView: View {
             cardLink(dest: StressView(), title: card.title, sub: card.subtitle,
                      value: stressText, tint: StrandPalette.accent, frac: fracOver(stress, 3))
         case .fitnessAge:
-            cardLink(dest: metricDetail("fitness_age"), title: card.title, sub: card.subtitle,
-                     value: unitText(fitnessAge, card.unit), tint: StrandPalette.chargeColor, frac: 0.5)
+            cardLink(dest: metricDetail("fitness_age"), title: card.title,
+                     sub: weeklySubtitle(card.subtitle, fitnessAgeDay),
+                     value: unitText(fitnessAge, card.unit), tint: StrandPalette.chargeColor, frac: nil)
         case .vitality:
-            cardLink(dest: metricDetail("vitality"), title: card.title, sub: card.subtitle,
+            cardLink(dest: metricDetail("vitality"), title: card.title,
+                     sub: weeklySubtitle(card.subtitle, vitalityDay),
                      value: intText(vitality), tint: liquidPurple, frac: frac(vitality))
         case .hrv:
             cardLink(dest: metricDetail("hrv"), title: card.title, sub: card.subtitle,
@@ -759,22 +788,32 @@ struct LiquidTodayView: View {
         let hrv = displayDay?.avgHrv ?? vitalsDay?.avgHrv
         let rhr = (displayDay?.restingHr ?? vitalsDay?.restingHr).map(Double.init)
         let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm
+        // A value carried from an earlier night says which night, instead of a delta that would compare
+        // that night with itself.
+        let carriedFrom = vitalsDay.map { "From \(Self.shortDayLabel($0.day))" }
+        let hrvCarried = displayDay?.avgHrv == nil && vitalsDay?.avgHrv != nil
+        let rhrCarried = displayDay?.restingHr == nil && vitalsDay?.restingHr != nil
+        let respCarried = displayDay?.respRateBpm == nil && vitalsDay?.respRateBpm != nil
         return VStack(spacing: 8) {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2), spacing: 8) {
-                tile("HRV", intText(hrv), "ms", caption: deltaCaption(hrv, priorHrv, unit: "ms")) {
-                    MinimalLine(values: weekHrv, minSpan: 8)
+                tile("HRV", intText(hrv), "ms",
+                     caption: hrvCarried ? (carriedFrom ?? "") : deltaCaption(hrv, priorHrv, unit: "ms")) {
+                    MinimalLine(slots: weekHrv, minSpan: 8)
                 }
-                tile("Resting HR", intText(rhr), "bpm", caption: deltaCaption(rhr, priorRhr, unit: "")) {
-                    MinimalLine(values: weekRhr, minSpan: 6)
+                tile("Resting HR", intText(rhr), "bpm",
+                     caption: rhrCarried ? (carriedFrom ?? "") : deltaCaption(rhr, priorRhr, unit: "")) {
+                    MinimalLine(slots: weekRhr, minSpan: 6)
                 }
                 tile("Sleep", sleepText, "", caption: sleepWindowCaption) { sleepStageBar }
                 tile("Steps", stepsText, "", caption: weekAverageCaption(weekSteps)) {
                     MiniBars(values: weekSteps)
                 }
-                tile("Breathing", unitText(resp, "", decimals: 1), "rpm", caption: "During sleep") {
-                    MinimalLine(values: weekResp, minSpan: 2)
+                tile("Breathing", unitText(resp, "", decimals: 1), "rpm",
+                     caption: respCarried ? (carriedFrom ?? "") : "During sleep") {
+                    MinimalLine(slots: weekResp, minSpan: 2)
                 }
-                tile("Stress", stressWord, "", caption: "Today") {
+                tile("Stress", stressWord, "",
+                     caption: selectedDayOffset == 0 ? "Today" : Self.shortDayLabel(selectedDayKey)) {
                     MinimalBar(frac: stressDay == selectedDayKey ? (stress ?? 0) / 3 : 0, height: 6)
                         .padding(.top, 14)
                 }
@@ -861,11 +900,48 @@ struct LiquidTodayView: View {
         return d == 0 ? "Steady vs 7 days" : "\(d > 0 ? "+" : "")\(d)\(u) vs 7 days"
     }
 
-    private func weekAverageCaption(_ week: [Double]) -> String {
-        guard !week.isEmpty else { return "7-day trend" }
-        let avg = week.reduce(0, +) / Double(week.count)
-        return "7-day avg \(Self.decimalFormatter.string(from: NSNumber(value: Int(avg.rounded()))) ?? "")"
+    /// Average of the completed days in the 7-day window (today's partial count is left out), and how
+    /// many days it covers when that's fewer than 7.
+    private func weekAverageCaption(_ slots: [Double?]) -> String {
+        let done = (selectedDayOffset == 0 ? Array(slots.dropLast()) : slots).compactMap { $0 }
+        guard !done.isEmpty else { return "No earlier days" }
+        let avg = Int((done.reduce(0, +) / Double(done.count)).rounded())
+        let n = Self.decimalFormatter.string(from: NSNumber(value: avg)) ?? ""
+        return done.count >= 6 ? "7-day avg \(n)" : "Avg \(n) · \(done.count) day\(done.count == 1 ? "" : "s")"
     }
+
+    /// "18 Jul" under a weekly card whose newest value is more than two weeks old; its own subtitle otherwise.
+    private func weeklySubtitle(_ subtitle: String, _ day: String?) -> String {
+        guard let day else { return subtitle }
+        let age = WeeklyDigestEngine.addDays(logicalToday, -14)
+        return day < age ? "As of \(Self.shortDayLabel(day))" : subtitle
+    }
+
+    /// The 7 calendar days ending on `day`, oldest first, each with its row or nil. Pure.
+    static func weekSlots(_ week: [DailyMetric], endingOn day: String) -> [DailyMetric?] {
+        let byDay = Dictionary(week.map { ($0.day, $0) }, uniquingKeysWith: { a, _ in a })
+        return (0..<7).map { byDay[WeeklyDigestEngine.addDays(day, $0 - 6)] }
+    }
+
+    /// "Mon 20 Oct" for a local day key.
+    static func shortDayLabel(_ day: String) -> String {
+        guard let d = dayKeyLocalParser.date(from: day) else { return day }
+        return shortDayFormatter.string(from: d)
+    }
+
+    private static let dayKeyLocalParser: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static let shortDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE d MMM")
+        return f
+    }()
 
     // MARK: - Last workouts
 
@@ -960,7 +1036,10 @@ struct LiquidTodayView: View {
         // Prior-day vitals carry, resolved ONCE here (never in body). Bound to today's own key so it can't
         // echo today's still-forming row; only on today (a past day's own row is the whole story).
         let tkey = cachedDisplayDay?.day ?? selectedDayKey
-        cachedVitalsDay = (selectedDayOffset == 0) ? Repository.lastVitalsDay(days: repo.days, todayKey: tkey) : nil
+        let carry = (selectedDayOffset == 0) ? Repository.lastVitalsDay(days: repo.days, todayKey: tkey) : nil
+        // A night older than the carry window isn't "today's" vitals: with the strap off for months the
+        // tiles showed July values in October, undated. Same freshness rule as Rest.
+        cachedVitalsDay = carry.flatMap { TodayView.isCarryStale(priorDayKey: $0.day, todayKey: tkey) ? nil : $0 }
 
         let cal = Calendar.current
         let dayStart = cal.startOfDay(for: selectedLogicalDay)
@@ -972,10 +1051,11 @@ struct LiquidTodayView: View {
 
         // 7-day series ending on the selected day for the tiles (oldest first), resolved once here.
         let week = Self.calendarWeek(repo.days, endingOn: selectedDayKey)
-        weekHrv = week.compactMap { $0.avgHrv }
-        weekRhr = week.compactMap { $0.restingHr.map(Double.init) }
-        weekResp = week.compactMap { $0.respRateBpm }
-        weekSteps = week.compactMap { $0.steps.map(Double.init) }
+        let slots = Self.weekSlots(week, endingOn: selectedDayKey)
+        weekHrv = slots.map { $0?.avgHrv }
+        weekRhr = slots.map { $0?.restingHr.map(Double.init) }
+        weekResp = slots.map { $0?.respRateBpm }
+        weekSteps = slots.map { $0?.steps.map(Double.init) }
         let prior = week.filter { $0.day < selectedDayKey }
         priorHrv = prior.compactMap { $0.avgHrv }
         priorRhr = prior.compactMap { $0.restingHr.map(Double.init) }
@@ -1003,8 +1083,10 @@ struct LiquidTodayView: View {
         // the writes into one pass instead of one per await.
         let restSeries = await restA
         let stepsSeries = await stepsA
-        let newFitnessAge = (await fitA).last?.value   // history-wide latest banked (not day-scoped)
-        let newVitality = (await vitA).last?.value
+        let fitLast = (await fitA).last                 // history-wide latest banked (not day-scoped)
+        let vitLast = (await vitA).last
+        let newFitnessAge = fitLast?.value
+        let newVitality = vitLast?.value
         let newWorkouts = await wkA
         // StressModel loops the full history to build its baseline — run it OFF the main actor so a big
         // history doesn't stutter the UI. Snapshot the inputs (value types) into the detached task.
@@ -1023,6 +1105,8 @@ struct LiquidTodayView: View {
         stressDay = stressModel?.day
         fitnessAge = newFitnessAge
         vitality = newVitality
+        fitnessAgeDay = fitLast?.day
+        vitalityDay = vitLast?.day
         workouts = newWorkouts
         applyDaySeries()
     }
@@ -1057,7 +1141,8 @@ struct LiquidTodayView: View {
 
     private var synthLine: String {
         // No score of today's own: a readiness sentence from older days would read as today's verdict.
-        if displayDay?.recovery == nil, displayDay?.strain == nil, restScore == nil {
+        // Effort alone (it starts at 0 each morning) isn't enough to judge readiness by.
+        if displayDay?.recovery == nil, restScore == nil {
             return String(localized: "No scores for today yet. They fill in after a night's sleep.")
         }
         switch readiness.level {
@@ -1379,6 +1464,7 @@ private struct LiquidLiveHR: View {
     var tint: Color
     var fallback: [Double]        // today's banked 5-minute buckets — shown when there's no live stream
     var points: [TrendPoint] = [] // the same buckets with their times, drawn as a scrubbable chart
+    var allowLive = true          // false on a past day: show that day's chart, not the live strap
     var animated: Bool
 
     @EnvironmentObject private var live: LiveState
@@ -1386,16 +1472,16 @@ private struct LiquidLiveHR: View {
     @State private var beat = false
     private let maxSamples = 90   // ~1.5 min of 1 Hz live HR, enough to read the shape
 
-    private var isLive: Bool { live.connected && samples.count >= 2 }
+    private var isLive: Bool { allowLive && live.connected && samples.count >= 2 }
     private var series: [Double] { isLive ? samples : fallback }
     private var bigBpm: Int? {
-        if let hr = live.heartRate, hr > 0, live.connected { return hr }
+        if allowLive, let hr = live.heartRate, hr > 0, live.connected { return hr }
         if let last = fallback.last { return Int(last.rounded()) }
         return nil
     }
     private var subtitle: String {
         if isLive { return "Live · beat by beat" }
-        if fallback.count >= 2 { return "5-minute average · since midnight" }
+        if fallback.count >= 2 { return allowLive ? "5-minute average · since midnight" : "5-minute average" }
         return live.connected ? "Waiting for the strap" : "Strap not connected"
     }
 
@@ -1621,6 +1707,8 @@ private struct MinimalScoreCell: View {
     let label: String
     let score: Double?
     let tint: Color
+    /// The number to print when it differs from the 0–100 score (Effort on the 0–21 scale).
+    var text: String? = nil
     let onGuide: () -> Void
 
     var body: some View {
@@ -1628,7 +1716,7 @@ private struct MinimalScoreCell: View {
             VStack(spacing: 8) {
                 ZStack {
                     MinimalRing(value: score.map { $0 / 100 }, tint: tint, lineWidthFraction: 0.075)
-                    Text(score.map { String(Int($0.rounded())) } ?? "–")
+                    Text(text ?? score.map { String(Int($0.rounded())) } ?? "–")
                         .font(StrandFont.rounded(26, weight: .semibold))
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
@@ -1645,20 +1733,21 @@ private struct MinimalScoreCell: View {
 
 /// Seven small bars, the newest in the accent; the rest in a quiet grey.
 private struct MiniBars: View {
-    let values: [Double]
+    /// One slot per calendar day, oldest first; nil draws a short stub so a missing day reads as missing.
+    let values: [Double?]
 
     var body: some View {
         GeometryReader { geo in
-            let mx = max(1, values.max() ?? 1)
-            // Seven fixed slots, newest on the right, so two days of data don't draw two half-width slabs.
+            let mx = max(1, values.compactMap { $0 }.max() ?? 1)
             let slots = max(7, values.count)
             let gap: CGFloat = 4
             let w = max(2, (geo.size.width - gap * CGFloat(slots - 1)) / CGFloat(slots))
             HStack(alignment: .bottom, spacing: gap) {
                 ForEach(Array(values.enumerated()), id: \.offset) { i, v in
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(i == values.count - 1 ? StrandPalette.accent : StrandPalette.hairlineStrong)
-                        .frame(width: w, height: max(3, geo.size.height * CGFloat(v / mx)))
+                        .fill(v == nil ? StrandPalette.hairline
+                              : i == values.count - 1 ? StrandPalette.accent : StrandPalette.hairlineStrong)
+                        .frame(width: w, height: v.map { max(3, geo.size.height * CGFloat($0 / mx)) } ?? 2)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)

@@ -485,10 +485,19 @@ private struct RecoveryContributorsSection: View {
     }
 
     var body: some View {
-        let latest = repo.days.last
+        // The newest night with vitals that is still fresh (same carry window as Today). `repo.days.last`
+        // was often today's row before its night scored, so every bar read "—" under a "Solid" pill, and
+        // after a long gap it would have shown a months-old night as current.
+        let todayKey = Repository.logicalDayKey(Date())
+        let latest = repo.days.last {
+            $0.day <= todayKey && $0.avgHrv != nil
+                && !TodayView.isCarryStale(priorDayKey: $0.day, todayKey: todayKey)
+        }
         // A contributor needs at least the recovery seed depth of prior nights to score against
         // a baseline; below that we show CALIBRATING and leave the bars unfilled but honest.
-        let priorCount = repo.days.dropLast().compactMap(\.avgHrv).filter { $0 > 0 }.count
+        let priorStart = WeeklyDigestEngine.addDays(latest?.day ?? todayKey, -30)
+        let priorCount = repo.days.filter { $0.day < (latest?.day ?? todayKey) && $0.day >= priorStart }
+            .compactMap(\.avgHrv).filter { $0 > 0 }.count
         let ready = priorCount >= Baselines.minNightsSeed
         let contributors = buildContributors(latest)
 
@@ -522,10 +531,10 @@ private struct RecoveryContributorsSection: View {
     /// HRV and Sleep score higher when above baseline; Resting HR and Respiratory score higher
     /// when at/below baseline (lower is better). Strength is a centred 0–100 (baseline ≈ 70).
     private func buildContributors(_ latest: DailyMetric?) -> [Contributor] {
-        let hrvBase  = baseline { $0.avgHrv }
-        let rhrBase  = baseline { $0.restingHr.map(Double.init) }
-        let sleepBase = baseline { $0.totalSleepMin }
-        let respBase = baseline { $0.respRateBpm }
+        let hrvBase  = baseline(before: latest?.day) { $0.avgHrv }
+        let rhrBase  = baseline(before: latest?.day) { $0.restingHr.map(Double.init) }
+        let sleepBase = baseline(before: latest?.day) { $0.totalSleepMin }
+        let respBase = baseline(before: latest?.day) { $0.respRateBpm }
 
         return [
             Contributor(
@@ -557,8 +566,12 @@ private struct RecoveryContributorsSection: View {
 
     /// Mean of a per-day column across prior nights (excludes the latest day so "vs baseline"
     /// compares the latest reading against history). nil until enough nights exist.
-    private func baseline(_ key: (DailyMetric) -> Double?) -> Double? {
-        let prior = repo.days.dropLast().compactMap(key).filter { $0 > 0 }
+    /// Mean of the 30 calendar days before `day` (the shown night), not every earlier row: after a long
+    /// gap the old mean described a different stretch of time.
+    private func baseline(before day: String?, _ key: (DailyMetric) -> Double?) -> Double? {
+        guard let day else { return nil }
+        let start = WeeklyDigestEngine.addDays(day, -30)
+        let prior = repo.days.filter { $0.day < day && $0.day >= start }.compactMap(key).filter { $0 > 0 }
         guard prior.count >= Baselines.minNightsSeed else { return nil }
         return prior.reduce(0, +) / Double(prior.count)
     }

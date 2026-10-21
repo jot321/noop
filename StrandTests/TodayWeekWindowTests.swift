@@ -3,7 +3,7 @@ import WhoopStore
 @testable import Strand
 
 /// The Today tiles' 7-day window is 7 calendar days, not the last 7 rows: with the strap off for
-/// months, the last 7 rows reached back to August naps and "vs 7 days" read -69 ms.
+/// months, the last 7 rows reached back to nights months earlier.
 final class TodayWeekWindowTests: XCTestCase {
 
     private func daily(_ day: String, hrv: Double?) -> DailyMetric {
@@ -14,9 +14,9 @@ final class TodayWeekWindowTests: XCTestCase {
     }
 
     func testOldRowsBeyondAGapAreLeftOut() {
-        let days = [daily("2026-07-28", hrv: nil), daily("2026-08-02", hrv: 117.6),
-                    daily("2026-08-03", hrv: 113.6), daily("2026-10-20", hrv: nil),
-                    daily("2026-10-21", hrv: 46.7)]
+        let days = [daily("2026-07-28", hrv: nil), daily("2026-08-02", hrv: 90),
+                    daily("2026-08-03", hrv: 88), daily("2026-10-20", hrv: nil),
+                    daily("2026-10-21", hrv: 50)]
         let week = LiquidTodayView.calendarWeek(days, endingOn: "2026-10-21")
         XCTAssertEqual(week.map(\.day), ["2026-10-20", "2026-10-21"])
     }
@@ -27,5 +27,12 @@ final class TodayWeekWindowTests: XCTestCase {
         let week = LiquidTodayView.calendarWeek(days, endingOn: "2026-10-21")
         XCTAssertEqual(week.map(\.day), ["2026-10-15", "2026-10-18", "2026-10-21"],
                        "15 Oct is day 1 of 7; 14 Oct and the future 22 Oct are outside")
+    }
+
+    func testWeekSlotsKeepMissingDaysAsGaps() {
+        let days = [daily("2026-10-16", hrv: 40), daily("2026-10-19", hrv: 44), daily("2026-10-21", hrv: 50)]
+        let slots = LiquidTodayView.weekSlots(days, endingOn: "2026-10-21")
+        XCTAssertEqual(slots.count, 7)
+        XCTAssertEqual(slots.map { $0?.day }, [nil, "2026-10-16", nil, nil, "2026-10-19", nil, "2026-10-21"])
     }
 }
