@@ -74,9 +74,10 @@ struct HRVSnapshotView: View {
             methodologyCard
             if !bonded { notBondedHint }
         }
-        // Pull new R-R intervals into the capture buffer as they arrive — same path as BreathingView.
-        .onChangeCompat(of: live.rr) { rr in
-            ingest(rr)
+        // Pull every R-R packet into the capture buffer, including one equal to the last (onChange skipped
+        // repeats and lost beats); same path as BreathingView. dropFirst skips the packet already shown.
+        .task {
+            for await packet in live.$rr.dropFirst().values { ingest(packet) }
         }
         // Capture countdown — only ticks while capturing.
         .onReceive(secondTimer) { _ in
@@ -437,7 +438,9 @@ struct HRVSnapshotView: View {
     private func ingest(_ rr: [Int]) {
         guard phase == .capturing, !rr.isEmpty else { return }
         captureBuffer.append(contentsOf: rr)
-        runningRMSSD = HRVAnalyzer.rmssdRaw(captureBuffer.map(Double.init))
+        // Cleaned like the final reading (range filter, ectopic rejection, adjacent beats only): the raw
+        // running figure jumped by hundreds of ms on one missed beat.
+        runningRMSSD = HRVAnalyzer.rmssd(diffs: HRVAnalyzer.adjacentDiffs(captureBuffer.map(Double.init)))
     }
 
     // MARK: - Save
