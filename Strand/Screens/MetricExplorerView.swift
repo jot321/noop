@@ -508,18 +508,15 @@ struct MetricDetailView: View {
     /// the caption, so the dimmed chips read as "not yet" rather than broken.
     private var hasLockedRanges: Bool { !ExploreRange.allCases.allSatisfy(isUnlocked) }
 
-    /// The window immediately preceding the active one (equal length, by day count).
-    private func previousWindow(effectiveRange: ExploreRange,
-                                windowed: [(day: String, value: Double)]) -> [(day: String, value: Double)] {
-        guard effectiveRange != .all else { return [] }
-        let size = windowed.count
-        guard size > 0 else { return [] }
-        // Index of the active window's first row, then step back `size` rows.
-        guard let firstDay = windowed.first?.day,
-              let lo = series.firstIndex(where: { $0.day == firstDay }) else { return [] }
-        let prevLo = max(0, lo - size)
-        guard prevLo < lo else { return [] }
-        return Array(series[prevLo..<lo])
+    /// The readings in the window immediately before the active one: the same number of CALENDAR
+    /// days ending the day before it starts. The active window ends on the latest reading (see
+    /// `slice(for:)`). Stepping back the same number of READINGS compared June with May across a
+    /// gap; now an empty prior period reads "no prior <range>". Empty for ALL.
+    static func previousWindow(series: [(day: String, value: Double)], days: Int?) -> [(day: String, value: Double)] {
+        guard let days, let last = series.last?.day,
+              let prev = DayWindow.previousWindow(start: DayWindow.windowStart(endingOn: last, days: days),
+                                                  end: last) else { return [] }
+        return series.filter { $0.day >= prev.start && $0.day <= prev.end }
     }
 
     private func trendPoints(_ windowed: [(day: String, value: Double)]) -> [TrendPoint] {
@@ -555,17 +552,25 @@ struct MetricDetailView: View {
         return (lo...hi, s.mean)
     }
 
-    /// A short "vs your normal" readout for the hero (WS-4a HRV / WS-4b RHR): the recent 7-reading
-    /// average against the personal-baseline center, as a signed percentage. This is what makes a score
+    /// A short "vs your normal" readout for the hero (WS-4a HRV / WS-4b RHR): the last 7 days' average
+    /// (`recentMean`) against the personal-baseline center, as a signed percentage. This is what makes a score
     /// legible against the research's "trend vs personal baseline, within ~10% normal" frame — e.g. HRV
     /// reads "12% below your normal" instead of a bare number. nil without a band or enough recent points.
     /// The colour reads the deviation's *direction* against `higherIsBetter` (a drop in HRV is a warning,
     /// a drop in RHR is positive); neutral within the band or when the metric has no better-direction.
-    private var baselineStatus: (text: String, color: Color)? {
-        guard let b = baselineBand else { return nil }
-        let recent = Array(series.suffix(7)).map(\.value)
+    /// The "recent" average the baseline status reads: readings from the last 7 calendar days
+    /// ending today, and at least 3 of them, else nil (the status hides). The last 7 READINGS
+    /// could be from August and still be called "below your normal" today.
+    static func recentMean(_ series: [(day: String, value: Double)], today: String) -> Double? {
+        let start = DayWindow.windowStart(endingOn: today, days: 7)
+        let recent = series.filter { $0.day >= start && $0.day <= today }.map(\.value)
         guard recent.count >= 3 else { return nil }
-        let mean = recent.reduce(0, +) / Double(recent.count)
+        return recent.reduce(0, +) / Double(recent.count)
+    }
+
+    private var baselineStatus: (text: String, color: Color)? {
+        guard let b = baselineBand,
+              let mean = Self.recentMean(series, today: Repository.localDayKey(Date())) else { return nil }
         let center = b.center
         guard center != 0 else { return nil }
         let pct = (mean - center) / abs(center) * 100
@@ -901,8 +906,8 @@ struct MetricDetailView: View {
         let windowValues = windowed.map(\.value)
         let s = ComparisonEngine.stat(windowValues)
         let cmp = ComparisonEngine.compare(current: windowValues,
-                                           previous: previousWindow(effectiveRange: effectiveRange,
-                                                                    windowed: windowed).map(\.value))
+                                           previous: Self.previousWindow(series: series,
+                                                                         days: effectiveRange.days).map(\.value))
         let accent = metricAccent(metric)
 
         // Δ vs previous equal-length window. Tinted by higherIsBetter.
