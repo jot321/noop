@@ -740,15 +740,26 @@ struct TrendsView: View {
 
     // MARK: Year heat-strip
 
+    /// Rows for the heat strip, chosen by DATE: the 365 calendar days ending `today`, or all history
+    /// on ALL when it reaches back further (then `allHistory` is true, for the title).
+    /// `days.suffix(365)` counted rows, so with gaps a "past year" strip reached back more than a year.
+    static func yearStripRows(_ days: [DailyMetric], range: Range, today: String) -> (rows: [DailyMetric], allHistory: Bool) {
+        let yearStart = DayWindow.windowStart(endingOn: today, days: 365)
+        let reachesBack = (days.first?.day).map { $0 < yearStart } ?? false
+        let start = (range == .all && reachesBack) ? (days.first?.day ?? yearStart) : yearStart
+        return (days.filter { $0.day >= start && $0.day <= today }, range == .all && reachesBack)
+    }
+
     private var yearStrip: some View {
-        // Always show at least a full year for context; expand to all history on ALL.
-        let stripDays = max(range.days ?? repo.days.count, 365)
-        let recent = repo.days.suffix(stripDays)
-        let recoveryDays: [RecoveryDay] = recent.compactMap { d in
+        // Always show the past year for context; expand to all history on ALL. The strip runs to
+        // today, so days since the newest reading show as empty squares.
+        let today = Repository.localDayKey(Date())
+        let strip = Self.yearStripRows(repo.days, range: range, today: today)
+        let recoveryDays: [RecoveryDay] = strip.rows.compactMap { d in
             guard let dt = date(d.day) else { return nil }
             return RecoveryDay(date: dt, score: d.recovery)
         }
-        let title = (range == .all && repo.days.count > 365) ? String(localized: "Charge (all history)") : String(localized: "Charge (past year)")
+        let title = strip.allHistory ? String(localized: "Charge (all history)") : String(localized: "Charge (past year)")
         return NoopCard(tint: StrandPalette.chargeColor) {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 SectionHeader("\(title)", overline: "Calendar", trailing: String(localized: "\(recoveryDays.filter { $0.score != nil }.count) days"))
@@ -756,7 +767,8 @@ struct TrendsView: View {
                     sparsePlaceholder.frame(height: 120)
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        YearHeatStrip(days: recoveryDays).padding(.vertical, NoopMetrics.space1 / 2)
+                        YearHeatStrip(days: recoveryDays, through: date(today))
+                            .padding(.vertical, NoopMetrics.space1 / 2)
                     }
                     Divider().overlay(StrandPalette.hairline)
                     legend
