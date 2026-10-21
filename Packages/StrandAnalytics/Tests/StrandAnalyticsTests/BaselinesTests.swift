@@ -299,4 +299,89 @@ final class BaselinesTests: XCTestCase {
         XCTAssertEqual(first.status, .calibrating)
         XCTAssertFalse(first.usable)
     }
+
+    // MARK: - Calendar gaps (audit I4, 2026-10-21)
+
+    /// Six nights in early March, then nothing until a night 40 days later. Days with no row are
+    /// missing nights, so the baseline going into the return night is stale, not provisional.
+    func testLongGapBeforeANightMakesTheBaselineStale() {
+        let keys = ["2026-03-01", "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06",
+                    "2026-04-15"]
+        let vals: [Double?] = [60, 62, 58, 61, 59, 60, 64]
+        let back = Baselines.foldHistory(vals, dayKeys: keys, before: "2026-04-15",
+                                         cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        XCTAssertEqual(back.nValid, 6)
+        XCTAssertEqual(back.nightsSinceUpdate, 39, "7 Mar to 14 Apr are 39 missing nights")
+        XCTAssertEqual(back.status, .stale)
+        XCTAssertFalse(back.usable)
+        // The dictionary form the Today breakdown calls gives the same state.
+        let dict = Dictionary(uniqueKeysWithValues: zip(keys, vals.map { $0! }))
+        XCTAssertEqual(Baselines.foldCalendar(values: dict, before: "2026-04-15", cfg: Baselines.hrvCfg,
+                                              baselineEpoch: 0), back)
+    }
+
+    /// A short gap (under staleDays) only counts the missing nights; the state stays usable.
+    func testShortGapCountsMissingNightsButStaysUsable() {
+        let keys = ["2026-03-01", "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-10"]
+        let vals: [Double?] = [60, 62, 58, 61, 59]
+        let s = Baselines.foldHistory(vals, dayKeys: keys, before: "2026-03-10",
+                                      cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        XCTAssertEqual(s.nightsSinceUpdate, 5)
+        XCTAssertEqual(s.status, .provisional)
+    }
+
+    /// The dense fold equals folding an explicit calendar with nil on every missing day.
+    func testCalendarFoldMatchesExplicitNilFilledFold() {
+        let dict: [String: Double] = ["2026-02-26": 55, "2026-02-27": 57, "2026-03-02": 54,
+                                      "2026-03-03": 58, "2026-03-09": 61]
+        // 26 Feb … 10 Mar (2026 is not a leap year).
+        let explicit: [Double?] = [55, 57, nil, nil, 54, 58, nil, nil, nil, nil, nil, 61, nil]
+        let expected = Baselines.foldHistory(explicit, cfg: Baselines.hrvCfg)
+        XCTAssertEqual(Baselines.foldCalendar(values: dict, before: "2026-03-11", cfg: Baselines.hrvCfg,
+                                              baselineEpoch: 0), expected)
+    }
+
+    /// The one-pass timeline the engine uses answers every night exactly like a fresh fold per
+    /// night (audit P3: same scores, without re-folding the whole history for each night).
+    func testTimelineMatchesFreshFoldForEveryDay() {
+        var dict: [String: Double] = [:]
+        var idx = 0
+        for i in 0..<120 {
+            idx += 1 + (i % 17 == 0 ? 25 : i % 3)
+            dict[Baselines.dayKey(fromIndex: 20_000 + idx)] = 40 + Double((i * 37) % 45)
+        }
+        let timeline = Baselines.CalendarFold(values: dict, cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        for d in 20_000...(20_000 + idx + 30) {
+            let day = Baselines.dayKey(fromIndex: d)
+            // Reference: an explicit nil-filled array from the first value to the day before.
+            let first = dict.keys.compactMap(Baselines.dayIndex).min()!
+            let explicit: [Double?] = first < d ? (first..<d).map { dict[Baselines.dayKey(fromIndex: $0)] } : []
+            let expected = explicit.isEmpty ? Baselines.foldHistory([], cfg: Baselines.hrvCfg)
+                                            : Baselines.foldHistory(explicit, cfg: Baselines.hrvCfg)
+            XCTAssertEqual(timeline.state(before: day), expected, day)
+        }
+    }
+
+    /// The recalibration epoch still drops every night before it in the calendar form.
+    func testCalendarFoldHonoursRecalibrationEpoch() {
+        let dict: [String: Double] = ["2026-03-01": 90, "2026-03-02": 92, "2026-03-03": 91,
+                                      "2026-03-04": 50, "2026-03-05": 52]
+        let epoch = 1_772_582_400.0   // 2026-03-04T00:00:00Z
+        let s = Baselines.foldCalendar(values: dict, before: "2026-03-06", cfg: Baselines.hrvCfg,
+                                       baselineEpoch: epoch)
+        XCTAssertEqual(s.nValid, 2)
+        XCTAssertLessThan(s.baseline, 60)
+    }
+
+    func testDayIndexRoundTripsAndRejectsBadDates() {
+        XCTAssertEqual(Baselines.dayIndex("1970-01-01"), 0)
+        XCTAssertEqual(Baselines.dayIndex("2026-03-01")! - Baselines.dayIndex("2026-02-28")!, 1)
+        XCTAssertEqual(Baselines.dayIndex("2028-03-01")! - Baselines.dayIndex("2028-02-28")!, 2)
+        XCTAssertNil(Baselines.dayIndex("2026-02-29"))
+        XCTAssertNil(Baselines.dayIndex("2026-2-01"))
+        XCTAssertNil(Baselines.dayIndex("yesterday!"))
+        for i in stride(from: -800, to: 30_000, by: 7) {
+            XCTAssertEqual(Baselines.dayIndex(Baselines.dayKey(fromIndex: i)), i)
+        }
+    }
 }

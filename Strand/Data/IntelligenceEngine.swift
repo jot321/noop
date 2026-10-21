@@ -137,6 +137,9 @@ final class IntelligenceEngine: ObservableObject {
         /// (`RecoveryScorer.skinTempRelative`), or nil when no deviation is available. Surfaced as
         /// "+0.3 C vs your normal" with a relative tier tag; never a fake clinical absolute.
         var skinTempRel: SkinTempRelative? = nil
+        /// The night had HRV but no Charge because the HRV baseline went stale over a long gap off the
+        /// wrist (audit I4): the card says it is re-learning rather than showing a bare dash.
+        var relearning: Bool = false
         var id: String { day }
     }
 
@@ -772,40 +775,17 @@ final class IntelligenceEngine: ObservableObject {
         // rhr/resp/skin honour the Charge-wide recalibration epoch (noop.recoveryBaselineEpoch); 0 = no-op,
         // so this is byte-identical to the plain fold until the user taps Recalibrate, at which point the
         // whole Charge build-up (HRV + resting HR + resp + skin) re-anchors together.
-        let recoveryEpoch = Baselines.recoveryBaselineEpoch()
-        let hrvDayKeys = histHrvByDay.keys.sorted()                         // chronological "yyyy-MM-dd"
-        let hrvSeq = hrvDayKeys.map { histHrvByDay[$0]! }                   // chronological [Double?]
-        let rhrDayKeys = histRhrByDay.keys.sorted()
-        let rhrSeq = rhrDayKeys.map { histRhrByDay[$0]! }
-        let respDayKeys = histRespByDay.keys.sorted()
-        let respSeq = respDayKeys.map { histRespByDay[$0]! }
         // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
-        // so fold purely over the pass-1 nightly means in chronological order.
-        let skinDayKeys = nightlySkinByDay.keys.sorted()
-        let skinSeq = skinDayKeys.map { nightlySkinByDay[$0]! }
-        // Resp baseline gated on `usable`: RecoveryScorer includes the resp term whenever a
-        // baseline object is present , a CALIBRATING (<4-night) baseline would let one noisy
-        // RSA night move recovery (mirrors the skin-temp use-site gate; honest cold-start).
+        // so it folds purely over the pass-1 nightly means.
         // Each night is scored against a baseline folded ONLY over the nights before it (audit A1,
-        // 2026-10-21). One fold over the whole window let a night's own value and every later night
-        // move its Charge, gave the first nights scores before any baseline existed, and shifted past
-        // scores as new nights arrived.
+        // 2026-10-21), over the CALENDAR so days with no row count as missing nights and a long gap
+        // turns the baseline stale (audit I4), folded once per metric instead of once per night (P3).
+        let chargeBaselines = Self.ChargeBaselines(
+            hrv: histHrvByDay, rhr: histRhrByDay, resp: histRespByDay, skin: nightlySkinByDay,
+            cfg: (hrv: hrvCfg, rhr: rhrCfg, resp: respCfg, skin: skinCfg),
+            hrvEpoch: Baselines.hrvBaselineEpoch(), recoveryEpoch: Baselines.recoveryBaselineEpoch())
         func baselinesBefore(_ day: String) -> AnalyticsEngine.ProfileBaselines {
-            let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, before: day, cfg: respCfg,
-                                                 baselineEpoch: recoveryEpoch)
-            // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
-            // (AnalyticsEngine's skinTempDevC guard) so this is belt-and-suspenders, but it stops a
-            // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
-            let skinFold = Baselines.foldHistory(skinSeq, dayKeys: skinDayKeys, before: day, cfg: skinCfg,
-                                                 baselineEpoch: recoveryEpoch)
-            return AnalyticsEngine.ProfileBaselines(
-                // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via
-                // their parallel day keys, so the manual Recalibrate restarts the whole Charge build-up.
-                hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, before: day, cfg: hrvCfg),
-                restingHR: Baselines.foldHistory(rhrSeq, dayKeys: rhrDayKeys, before: day, cfg: rhrCfg,
-                                                 baselineEpoch: recoveryEpoch),
-                resp: respFold.usable ? respFold : nil,
-                skinTemp: skinFold.usable ? skinFold : nil)
+            chargeBaselines.before(day)
         }
 
         // Real (non-detected) workouts in the scored window, used to de-duplicate detected bouts so a
@@ -880,7 +860,7 @@ final class IntelligenceEngine: ObservableObject {
             let daily = sleepEditedDaily(night.daily, detected: night.cachedSleep, editsByStart: editsByStart,
                                          habitualMidsleepSec: habitualMidsleepSec)
             let baselines2 = baselinesBefore(daily.day)
-            let recovery = recomputeRecovery(daily, baselines2)
+            let recovery = Self.recomputeRecovery(daily, baselines2)
             // Charge term-breakdown trace (Group G): only when the Recovery test mode is on. Emits which
             // term moved Charge and which was nil and forced the renorm, tagged `.recovery`. The trace's
             // score is RecoveryScorer.recovery verbatim, so the `recovery` written above is unchanged.
@@ -902,7 +882,9 @@ final class IntelligenceEngine: ObservableObject {
             out.append(Computed(day: daily.day, recovery: recovery, strain: night.strain,
                                 sleepMin: daily.totalSleepMin, hrv: daily.avgHrv,
                                 rhr: daily.restingHr, source: source, confidence: chargeConf,
-                                drivers: drivers, skinTempRel: skinRel))
+                                drivers: drivers, skinTempRel: skinRel,
+                                relearning: recovery == nil && daily.avgHrv != nil
+                                    && baselines2.hrv?.status == .stale))
             // ── Per-day scoring diagnostic (Sleep overhaul §2.5) ─────────────────────────────────────
             // ONE concise, privacy-safe line per scored day into the shareable strap log: the day key, the
             // FINAL computed total-sleep minutes (after any edit substitution), how many sleep blocks the
@@ -1652,7 +1634,8 @@ final class IntelligenceEngine: ObservableObject {
     /// baseline is usable (RecoveryScorer gates on `hrvBaseline.usable`, i.e. ≥ minNightsSeed valid
     /// nights) , so the honest null-until-4-nights cold-start is free. Mirrors AnalyticsEngine's own
     /// recovery call + Android IntelligenceEngine.recomputeRecovery. (#78)
-    private func recomputeRecovery(_ daily: DailyMetric, _ baselines: AnalyticsEngine.ProfileBaselines) -> Double? {
+    nonisolated static func recomputeRecovery(_ daily: DailyMetric,
+                                              _ baselines: AnalyticsEngine.ProfileBaselines) -> Double? {
         guard let hrvVal = daily.avgHrv, let rhrVal = daily.restingHr, let hrvBase = baselines.hrv else { return nil }
         // Charge enrichment: feed the Rest COMPOSITE (÷100) as the sleep-quality term instead of raw
         // efficiency, and fold in the night's skin-temp deviation. Both come from the persisted daily
@@ -1705,6 +1688,38 @@ final class IntelligenceEngine: ObservableObject {
         return trace.map { line in
             let body = line.hasPrefix("charge ") ? String(line.dropFirst("charge ".count)) : line
             return "charge day=\(daily.day) " + body
+        }
+    }
+
+    /// The Charge baselines for one scoring pass (HRV, resting HR, respiration, skin temp), each folded
+    /// ONCE over the calendar so `before(day)` answers any night without re-folding the history (P3), and
+    /// counting days with no row as missing nights so a long gap reads `.stale` (I4). HRV honours the
+    /// HRV recalibration epoch; the other three honour the Charge-wide one. Resp and skin temp are handed
+    /// over only when usable: RecoveryScorer includes the resp term whenever a baseline object is present,
+    /// so a calibrating one would let one noisy night move Charge. Pure. (Audit A1/I4/P3, 2026-10-21.)
+    struct ChargeBaselines {
+        let hrv: Baselines.CalendarFold
+        let rhr: Baselines.CalendarFold
+        let resp: Baselines.CalendarFold
+        let skin: Baselines.CalendarFold
+
+        init(hrv: [String: Double?], rhr: [String: Double?], resp: [String: Double?], skin: [String: Double?],
+             cfg: (hrv: MetricCfg, rhr: MetricCfg, resp: MetricCfg, skin: MetricCfg),
+             hrvEpoch: Double, recoveryEpoch: Double) {
+            // A day whose value is nil (an import with no HRV) is a missing night, same as no row.
+            func values(_ m: [String: Double?]) -> [String: Double] { m.compactMapValues { $0 } }
+            self.hrv = Baselines.CalendarFold(values: values(hrv), cfg: cfg.hrv, baselineEpoch: hrvEpoch)
+            self.rhr = Baselines.CalendarFold(values: values(rhr), cfg: cfg.rhr, baselineEpoch: recoveryEpoch)
+            self.resp = Baselines.CalendarFold(values: values(resp), cfg: cfg.resp, baselineEpoch: recoveryEpoch)
+            self.skin = Baselines.CalendarFold(values: values(skin), cfg: cfg.skin, baselineEpoch: recoveryEpoch)
+        }
+
+        func before(_ day: String) -> AnalyticsEngine.ProfileBaselines {
+            let respFold = resp.state(before: day)
+            let skinFold = skin.state(before: day)
+            return AnalyticsEngine.ProfileBaselines(
+                hrv: hrv.state(before: day), restingHR: rhr.state(before: day),
+                resp: respFold.usable ? respFold : nil, skinTemp: skinFold.usable ? skinFold : nil)
         }
     }
 

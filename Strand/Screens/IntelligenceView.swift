@@ -279,6 +279,13 @@ struct IntelligenceView: View {
                     stat("HRV", d.hrv.map { "\(Int($0.rounded()))" } ?? "—", StrandPalette.metricPurple)
                     stat("RHR", d.rhr.map { "\($0)" } ?? "—", StrandPalette.metricRose)
                 }
+                // First night back after a long gap: the HRV baseline went stale, so Charge is withheld
+                // for a night while it re-learns (audit I4). Say so instead of leaving a bare dash.
+                if d.relearning {
+                    Text("Back after a long gap, so Charge is re-learning your baseline. It returns after another night with the strap on.")
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 // Effort load meter (0–100) as a filling LiquidTube — the horizontal liquid vessel Today's
                 // Key Metrics + Sleep's stage bars use — tinted along the strain ramp so it reads as
                 // at-a-glance cardio load. Static (posed) so each day row costs a cached frame, not a live
