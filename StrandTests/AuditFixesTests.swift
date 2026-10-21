@@ -27,8 +27,8 @@ final class AuditFixesTests: XCTestCase {
     // MARK: - A2: a hand-logged nap belongs to the day it ends on
 
     func testLoggedNapIsNotAddedToOtherDays() {
-        let napStart = ts("2026-07-12", 17, 15)
-        let edits = [napStart: edit(napStart, ts("2026-07-12", 18, 0))]
+        let napStart = ts("2026-07-12", 16, 0)
+        let edits = [napStart: edit(napStart, ts("2026-07-12", 16, 45))]
         XCTAssertEqual(IntelligenceEngine.twinlessEdits(endingOn: "2026-07-12", editsByStart: edits,
                                                         detectedStarts: [], offsetSec: ist).count, 1)
         for day in ["2026-07-17", "2026-07-18", "2026-07-22"] {

@@ -161,12 +161,12 @@ final class MetricSeriesStoreTests: XCTestCase {
     func testDeleteAllMetricSeriesRemovesEveryKeyOnlyOnThoseDays() async throws {
         let store = try await WhoopStore.inMemory()
         try await store.upsertMetricSeries([
-            MetricPoint(day: "2026-08-02", key: "sleep_performance", value: 51.9),
-            MetricPoint(day: "2026-08-02", key: "hrv_rmssd_deep", value: 114),
-            MetricPoint(day: "2026-08-03", key: "acwr", value: 0.5),
-            MetricPoint(day: "2026-10-21", key: "sleep_performance", value: 88.7),
+            MetricPoint(day: "2026-08-02", key: "sleep_performance", value: 60),
+            MetricPoint(day: "2026-08-02", key: "hrv_rmssd_deep", value: 80),
+            MetricPoint(day: "2026-08-03", key: "acwr", value: 1.0),
+            MetricPoint(day: "2026-10-21", key: "sleep_performance", value: 70),
         ], deviceId: "my-whoop-noop")
-        try await store.upsertMetricSeries([MetricPoint(day: "2026-08-02", key: "acwr", value: 0.7)],
+        try await store.upsertMetricSeries([MetricPoint(day: "2026-08-02", key: "acwr", value: 1.0)],
                                            deviceId: "other")
         let n = try await store.deleteAllMetricSeries(deviceId: "my-whoop-noop", days: ["2026-08-02", "2026-08-03"])
         XCTAssertEqual(n, 3)

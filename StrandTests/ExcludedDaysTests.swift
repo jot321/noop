@@ -56,13 +56,13 @@ final class ExcludedDaysTests: XCTestCase {
                                stagesJSON: "[]", userEdited: edited)
         }
         let sessions = [
-            session("2026-08-02 11:34", "2026-08-02 14:17"),               // excluded nap
+            session("2026-08-02 13:00", "2026-08-02 15:00"),               // excluded nap
             session("2026-08-02 23:30", "2026-08-03 07:00"),               // wakes on an excluded day
-            session("2026-08-03 14:27", "2026-08-03 17:25", edited: true), // hand-edited: kept
+            session("2026-08-03 14:00", "2026-08-03 16:00", edited: true), // hand-edited: kept
             session("2026-08-03 23:00", "2026-08-04 07:00"),               // wakes on 4 Aug: kept
         ]
         let starts = IntelligenceEngine.excludedSessionStarts(sessions, excluded: ["2026-08-02", "2026-08-03"],
                                                               offsetSec: ist)
-        XCTAssertEqual(starts, [ts("2026-08-02 11:34"), ts("2026-08-02 23:30")])
+        XCTAssertEqual(starts, [ts("2026-08-02 13:00"), ts("2026-08-02 23:30")])
     }
 }
