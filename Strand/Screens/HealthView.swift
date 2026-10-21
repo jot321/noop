@@ -438,29 +438,31 @@ private struct LiveTimeChart: View {
                 y: .value("BPM", s.bpm)
             )
             .interpolationMethod(.monotone)
-            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+            .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
             .foregroundStyle(lineGradient)
         }
         .chartYScale(domain: yDomain)
         // catmullRom overshoots on sharp HR turns and the area fill draws unclipped — clip the
         // plot so nothing bleeds below the card (mirrors TrendChart's fix for #104).
         .chartPlotStyle { plotArea in plotArea.clipped() }
+        // Same axis language as TrendChart: time labels without grid lines, values on the right over a
+        // light dashed grid.
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
                 AxisValueLabel(format: .dateTime.hour().minute().second())
                     .foregroundStyle(StrandPalette.textTertiary)
                     .font(StrandFont.footnote)
             }
         }
         .chartYAxis {
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { _ in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    .foregroundStyle(StrandPalette.hairlineStrong)
                 AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
                     .font(StrandFont.footnote)
             }
         }
-        .clipped()
+        .padding(.top, 8)
     }
 }
 
