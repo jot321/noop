@@ -144,10 +144,17 @@ public enum DaytimeStress {
     ///   - rr: the day's `[RRInterval]`.
     ///   - tzOffsetSeconds: seconds east of UTC, for placing each bucket on the LOCAL
     ///     clock (so "waking hours" and the hour labels are local). Defaults to UTC.
+    ///   - sleepWindows: the day's sleep sessions as unix-second `[start, end)` spans. Samples
+    ///     inside them are dropped before bucketing, so time asleep is neither scored nor part of
+    ///     the reference. The fixed 06:00-22:00 window alone let a late sleeper's 06:00-10:00
+    ///     sleep drag the reference down and read the first waking hours as HIGH.
     ///
     /// Returns `.empty` when there isn't a single hour with enough HR to score.
     public static func analyze(hr: [HRSample], rr: [RRInterval],
-                               tzOffsetSeconds: Int = 0) -> Result {
+                               tzOffsetSeconds: Int = 0,
+                               sleepWindows: [(start: Int, end: Int)] = []) -> Result {
+        let hr = sleepWindows.isEmpty ? hr : hr.filter { !isAsleep($0.ts, sleepWindows) }
+        let rr = sleepWindows.isEmpty ? rr : rr.filter { !isAsleep($0.ts, sleepWindows) }
         // v7.0.2 perf (#707): buckets the day's full HR + R-R streams into per-hour aggregates and runs an
         // RMSSD per hour — invoked from the Stress view, so a `body` re-evaluation re-buckets the whole day.
         // Memoize on the streams' fingerprint + tz offset; result is a small `Result`, raw arrays not held.
@@ -271,6 +278,11 @@ public enum DaytimeStress {
     static func floorDiv(_ a: Int, _ b: Int) -> Int {
         let q = a / b, r = a % b
         return (r != 0 && (r < 0) != (b < 0)) ? q - 1 : q
+    }
+
+    /// True when `ts` falls inside one of the `[start, end)` sleep spans.
+    static func isAsleep(_ ts: Int, _ windows: [(start: Int, end: Int)]) -> Bool {
+        windows.contains { ts >= $0.start && ts < $0.end }
     }
 
     /// Whether a local hour-bucket start falls inside the waking window the timeline scores

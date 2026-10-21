@@ -112,7 +112,13 @@ struct StressView: View {
         let rr = (try? await repo.storeHandle()?.rrIntervals(
             deviceId: repo.deviceId, from: from, to: to, limit: 200_000)) ?? []
 
-        daytime = DaytimeStress.analyze(hr: hr, rr: rr, tzOffsetSeconds: tz)
+        // Today's sleep sessions (last night, a lie-in, a nap), so time asleep inside 06:00-22:00 is not
+        // scored as daytime stress or used as the day's reference.
+        let sleepWindows = await repo.allSleepSessions(days: 2)
+            .filter { $0.effectiveStartTs < to && $0.endTs > from }
+            .map { (start: $0.effectiveStartTs, end: $0.endTs) }
+
+        daytime = DaytimeStress.analyze(hr: hr, rr: rr, tzOffsetSeconds: tz, sleepWindows: sleepWindows)
 
         // ADDITIVE advanced readouts, computed on-demand from the SAME `rr` (no extra fetch, no
         // DB / schema change, and no effect on the 0..3 score above). Each engine returns nil when
