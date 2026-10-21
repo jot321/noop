@@ -1624,9 +1624,10 @@ private struct MiniBars: View {
     var body: some View {
         GeometryReader { geo in
             let mx = max(1, values.max() ?? 1)
-            let n = max(1, values.count)
+            // Seven fixed slots, newest on the right, so two days of data don't draw two half-width slabs.
+            let slots = max(7, values.count)
             let gap: CGFloat = 4
-            let w = max(2, (geo.size.width - gap * CGFloat(n - 1)) / CGFloat(n))
+            let w = max(2, (geo.size.width - gap * CGFloat(slots - 1)) / CGFloat(slots))
             HStack(alignment: .bottom, spacing: gap) {
                 ForEach(Array(values.enumerated()), id: \.offset) { i, v in
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
@@ -1634,7 +1635,7 @@ private struct MiniBars: View {
                         .frame(width: w, height: max(3, geo.size.height * CGFloat(v / mx)))
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .bottom)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         }
     }
 }
