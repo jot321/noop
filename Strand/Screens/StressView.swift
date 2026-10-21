@@ -453,6 +453,10 @@ struct StressView: View {
             let isStressful = (up == higherIsStress)
             deltaText = String(localized: "\(up ? "+" : "−")\(Int(abs(delta).rounded())) vs base")
             deltaColor = isStressful ? StrandPalette.statusWarning : StrandPalette.statusPositive
+        } else if delta == nil {
+            // No day in the last 30 to compare with: say so rather than "at baseline".
+            deltaText = String(localized: "no recent baseline")
+            deltaColor = StrandPalette.textTertiary
         } else {
             deltaText = String(localized: "at baseline")
             deltaColor = StrandPalette.textTertiary
@@ -471,9 +475,10 @@ struct StressView: View {
 
     @ViewBuilder
     private func trendSection(_ model: StressModel) -> some View {
-        let points = windowedTrend(model)
+        let windowed = windowedTrend(model)
+        let points = windowed.points
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Stress Trend", overline: "History", trailing: range.name)
+            SectionHeader("Stress Trend", overline: "History", trailing: windowed.shown.name)
             if points.count >= 2 {
                 let avg = points.map(\.value).reduce(0, +) / Double(points.count)
                 // Axis top = highest reading rounded up, plus a little headroom, so a peak curve and
@@ -483,7 +488,7 @@ struct StressView: View {
                 let peak = (points.map(\.value).max() ?? 3).rounded(.up)
                 let yTop = max(1, peak + 0.3)
                 ChartCard(
-                    title: "Stress · \(range.label)",
+                    title: "Stress · \(windowed.shown.label)",
                     subtitle: String(localized: "Daily 0-3 proxy"),
                     trailing: String(localized: "avg \(String(format: "%.1f", avg))"),
                     tint: StressRamp.calm
@@ -524,12 +529,20 @@ struct StressView: View {
 
     /// The full daily proxy trend, sliced to the selected trailing window. Falls
     /// back to ALL when the trailing slice holds < 2 points.
-    private func windowedTrend(_ model: StressModel) -> [TrendPoint] {
-        let all = model.fullTrend
-        guard let days = range.days, let last = all.last?.date else { return all }
-        let cutoff = last.addingTimeInterval(-Double(days - 1) * 86_400)
+    private func windowedTrend(_ model: StressModel) -> (points: [TrendPoint], shown: ExploreRange) {
+        StressView.windowedTrend(model.fullTrend, range: range, today: Repository.localDayKey(Date()))
+    }
+
+    /// The window is the `range` calendar days ending TODAY (anchoring on the last point charted an
+    /// old stretch as "this month"). When it holds fewer than two points the chart falls back to all
+    /// history and `shown` is `.all`, so the labels name the span actually drawn.
+    static func windowedTrend(_ all: [TrendPoint], range: ExploreRange,
+                              today: String) -> (points: [TrendPoint], shown: ExploreRange) {
+        guard let days = range.days,
+              let cutoff = StressModel.dayParser.date(from: WeeklyDigestEngine.addDays(today, -(days - 1)))
+        else { return (all, .all) }
         let slice = all.filter { $0.date >= cutoff }
-        return slice.count >= 2 ? slice : all
+        return slice.count >= 2 ? (slice, range) : (all, .all)
     }
 
     // MARK: 4 · Methodology (transparency)
@@ -735,7 +748,7 @@ struct StressModel {
         f.setLocalizedDateFormatFromTemplate("d MMM"); return f
     }()
 
-    private static let dayParser: DateFormatter = {
+    static let dayParser: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(identifier: "UTC")
@@ -761,10 +774,11 @@ struct StressModel {
         let today = days[todayIdx]
         self.asOfDay = today.day
 
-        // Baseline window: up to 30 days ending the day BEFORE today, so "today"
-        // is measured against its own recent past rather than itself.
-        let history = Array(days[..<todayIdx])
-        let baseline = Array(history.suffix(30))
+        // Baseline window: the 30 calendar days before today, so "today" is measured against its own
+        // recent past rather than itself. Calendar days, not the last 30 rows: after a break in wear
+        // those reached back months, and "vs 30-day baseline" compared today with that old stretch.
+        let baselineStart = WeeklyDigestEngine.addDays(today.day, -30)
+        let baseline = days[..<todayIdx].filter { $0.day >= baselineStart }
 
         let rhrBase = baseline.compactMap { $0.restingHr }.map(Double.init)
         let hrvBase = baseline.compactMap { $0.avgHrv }

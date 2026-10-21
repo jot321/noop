@@ -13,7 +13,7 @@ import WhoopStore
 //   2. A uniform grid of fixed StatTiles, each with a sparkline and a "vs typical"
 //      caption: Performance, Efficiency, Consistency, Hours vs Needed, Restorative,
 //      Respiratory, Sleep Debt.
-//   2b. The sleep-debt LEDGER card — a rolling 14-night running balance of (slept −
+//   2b. The sleep-debt LEDGER card — a rolling 14-day running balance of (slept −
 //      personal need) with a plain-English read and a diverging per-night delta bar.
 //   3. "Stages vs typical" NoopCard — Deep/REM/Light as horizontal bars, last-night
 //      minutes with a marker at the personal typical (mean) so highs/lows pop.
@@ -1066,22 +1066,22 @@ struct SleepView: View {
         }
     }
 
-    // MARK: - 2b. Sleep-debt ledger (rolling 14-night running balance)
+    // MARK: - 2b. Sleep-debt ledger (rolling 14-day running balance)
 
     /// A running balance of (slept − personal need) across the recent fortnight, surfaced
     /// as one card: the net debt/surplus headline, a plain-English read, and a diverging
     /// bar of each night's delta (surplus above the line, deficit below). Honest: a simple
-    /// accumulator — a surplus night offsets a deficit one — capped at 14 nights, no-data
+    /// accumulator — a surplus night offsets a deficit one — over the last 14 calendar days, no-data
     /// nights skipped. (#242)
     @ViewBuilder
     private func sleepDebtLedger(_ model: SleepModel) -> some View {
         let ledger = model.sleepDebtLedger
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sleep-debt ledger", overline: "Last 14 nights",
+            SectionHeader("Sleep-debt ledger", overline: "Last 14 days",
                           trailing: String(localized: "running balance"))
             NoopCard(tint: StrandPalette.restColor) {
                 if ledger.nightCount == 0 {
-                    Text("No nights with sleep data yet. Your ledger fills in as you wear the strap to bed.")
+                    Text("No nights recorded in the last 14 days. The ledger fills in as you wear the strap to bed.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1265,12 +1265,16 @@ struct SleepView: View {
         // Trailing-30 trend points and the typical total are precomputed in the model build
         // (full passes over repo.days) — read here, not recomputed per render.
         let pts = model.trendPoints
-        let avg = model.typicalTotalMin.map { $0 / 60.0 }
+        // The average of the nights on the chart, so it matches the span the card names.
+        let avg: Double? = pts.isEmpty ? nil : pts.map(\.value).reduce(0, +) / Double(pts.count)
+        let last30 = model.trendIsLast30Days
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Asleep duration", overline: "Trend", trailing: String(localized: "Last 30 days"))
+            SectionHeader("Asleep duration", overline: "Trend",
+                          trailing: last30 ? String(localized: "Last 30 days") : String(localized: "All nights"))
             ChartCard(
                 title: "Hours asleep",
-                subtitle: String(localized: "Per night, trailing 30 days"),
+                subtitle: last30 ? String(localized: "Per night, trailing 30 days")
+                                 : String(localized: "Per night, every recorded night"),
                 trailing: avg.map { String(localized: "\(String(format: "%.1f", $0)) h avg") },
                 height: NoopMetrics.chartHeight,
                 tint: StrandPalette.restColor,
@@ -1339,6 +1343,7 @@ struct SleepView: View {
         } else {
             return nil
         }
+        let trend = durationTrendPoints
         return SleepModel(
             night: night,
             intervals: night.intervals,
@@ -1355,18 +1360,25 @@ struct SleepView: View {
             typicalDeepMin: typicalStageMin(\.deepMin),
             typicalRemMin: typicalStageMin(\.remMin),
             typicalLightMin: typicalStageMin(\.lightMin),
-            trendPoints: durationTrendPoints,
+            trendPoints: trend.points,
+            trendIsLast30Days: trend.isLast30Days,
             sleepDebtLedger: debtLedger)
     }
 
-    /// The rolling 14-night sleep-debt ledger from the cached daily metrics. Uses the
+    /// The rolling 14-day sleep-debt ledger from the cached daily metrics. Uses the
     /// SAME personal sleep need the tiles use (`sleepNeedMin`, ≥ 7.5 h, the per-user
     /// override over the 8 h default), measured against each night's `totalSleepMin`.
     /// Skips nights with no sleep (the analytics function does the skip). (#242)
     private var debtLedger: SleepDebtLedger {
-        SleepDebt.ledger(
-            series: repo.days.map { (day: $0.day, totalSleepMin: $0.totalSleepMin) },
-            needHours: sleepNeedMin / 60.0)
+        SleepView.debtLedger(days: repo.days, needHours: sleepNeedMin / 60.0,
+                             today: Repository.localDayKey(Date()))
+    }
+
+    /// The ledger over the 14 calendar days ending `today`. The last 14 ROWS reached back months after a
+    /// break in wear, so old short nights showed as a large current debt beside an on-target tile.
+    static func debtLedger(days: [DailyMetric], needHours: Double, today: String) -> SleepDebtLedger {
+        SleepDebt.ledger(series: days.map { (day: $0.day, totalSleepMin: $0.totalSleepMin) },
+                         needHours: needHours, endingOn: today)
     }
 
     // MARK: - Derived model
@@ -1856,9 +1868,19 @@ struct SleepView: View {
 
     // MARK: - Trend points
 
-    /// Trailing 30 days of total sleep, plotted in HOURS. Falls back to all nights with
-    /// data if the trailing window is too sparse.
-    private var durationTrendPoints: [TrendPoint] {
+    /// The last 30 calendar days of total sleep, plotted in HOURS. Falls back to every night with
+    /// data (and says so) when the window holds fewer than two.
+    private var durationTrendPoints: DurationTrend {
+        SleepView.durationTrend(days: repo.days, today: Repository.localDayKey(Date()))
+    }
+
+    /// The hours-asleep trend points, and whether they are the last 30 days (false = every night).
+    struct DurationTrend {
+        let points: [TrendPoint]
+        let isLast30Days: Bool
+    }
+
+    static func durationTrend(days: [DailyMetric], today: String) -> DurationTrend {
         let fmt = SleepView.dayParser
         func build(_ slice: ArraySlice<DailyMetric>) -> [TrendPoint] {
             slice.compactMap { d -> TrendPoint? in
@@ -1867,9 +1889,11 @@ struct SleepView: View {
                 return TrendPoint(date: date, value: mins / 60.0)
             }
         }
-        let recent = build(repo.days.suffix(30))
-        if recent.count >= 2 { return recent }
-        return build(repo.days[...])
+        // Calendar days, not the last 30 rows: after a break in wear those reached back months.
+        let first = WeeklyDigestEngine.addDays(today, -29)
+        let recent = build(days.filter { $0.day >= first && $0.day <= today }[...])
+        if recent.count >= 2 { return DurationTrend(points: recent, isLast30Days: true) }
+        return DurationTrend(points: build(days[...]), isLast30Days: false)
     }
 
     private func trendRange(_ pts: [TrendPoint]) -> ClosedRange<Double> {
@@ -2257,8 +2281,10 @@ private struct SleepModel {
     let typicalLightMin: Double?
 
     let trendPoints: [TrendPoint]
+    /// False when the last 30 days held under two nights and the trend shows every night instead.
+    let trendIsLast30Days: Bool
 
-    /// Rolling 14-night sleep-debt ledger: Σ(slept − personal need) across the recent
+    /// Rolling 14-day sleep-debt ledger: Σ(slept − personal need) across the recent
     /// fortnight, with the per-night deltas behind it. Computed once per data change.
     let sleepDebtLedger: SleepDebtLedger
 }

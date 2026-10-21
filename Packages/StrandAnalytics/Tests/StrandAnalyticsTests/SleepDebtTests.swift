@@ -57,6 +57,18 @@ final class SleepDebtTests: XCTestCase {
         XCTAssertEqual(l.nights.last?.day, "2026-06-16")       // newest kept
     }
 
+    /// The calendar window keeps only the nights inside the `window` days ending on the given day.
+    func testCalendarWindowLeavesOutOldNights() {
+        let series: [(day: String, totalSleepMin: Double?)] = [
+            ("2026-03-01", 300), ("2026-03-02", 300),    // months back: not this fortnight
+            ("2026-06-02", 420),                           // day 1 of the 14
+            ("2026-06-15", 480), ("2026-06-16", 540),    // the future row is outside too
+        ]
+        let l = SleepDebt.ledger(series: series, needHours: 8.0, window: 14, endingOn: "2026-06-15")
+        XCTAssertEqual(l.nights.map { $0.day }, ["2026-06-02", "2026-06-15"])
+        XCTAssertEqual(l.balanceMin, -60.0, accuracy: 1e-9)
+    }
+
     /// Empty / all-skipped input → empty ledger, zero balance.
     func testEmptyLedger() {
         let l = SleepDebt.ledger(series: [], needHours: 8.0)

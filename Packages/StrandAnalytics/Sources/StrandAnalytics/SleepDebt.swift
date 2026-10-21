@@ -110,6 +110,19 @@ public enum SleepDebt {
         return SleepDebtLedger(balanceMin: round1(balance), nights: nights, needMin: needMin)
     }
 
+    /// The ledger over the `window` CALENDAR days ending on `day` ("yyyy-MM-dd", inclusive), rather
+    /// than the last `window` rows. After weeks without the strap the last 14 rows reached back months,
+    /// so old short nights showed as this fortnight's debt. A gap stays a gap: the window can hold fewer
+    /// nights than days, or none.
+    public static func ledger(series: [(day: String, totalSleepMin: Double?)],
+                              needHours: Double = AnalyticsEngine.Rest.defaultNeedHours,
+                              window: Int = defaultWindowNights,
+                              endingOn day: String) -> SleepDebtLedger {
+        let first = WeeklyDigestEngine.addDays(day, -(max(window, 1) - 1))
+        return ledger(series: series.filter { $0.day >= first && $0.day <= day },
+                      needHours: needHours, window: window)
+    }
+
     /// Round to 1 decimal place (the ledger is reported in whole/near-whole minutes;
     /// 1 dp keeps Σ stable without trailing float noise). Mirrors the Kotlin rounding.
     static func round1(_ v: Double) -> Double { (v * 10.0).rounded() / 10.0 }
